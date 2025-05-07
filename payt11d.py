@@ -1,49 +1,61 @@
 #!/usr/bin/env python3
 # Verifone P400 connector – Quick‑Sale flow
-# 2025‑05‑07  v1.32‑Q  (adds Tx‑type / Credit‑term / Currency selectors)
+# 2025‑05‑07  v1.33‑I  (adds Installments spin‑box)
 
-import sys, socket, os, re, random, html
+import sys
+import socket
+import os
+import re
+import random
+import html
 from datetime import datetime, timezone
-from base64   import b64decode, b64encode
-from typing   import Dict, Optional, List, Tuple
+from base64 import b64decode, b64encode
+from typing import Dict, Optional, List, Tuple
 
-from PyQt5.QtCore    import Qt, QThread, pyqtSignal, QDate
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QDate
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QDialog, QLabel, QLineEdit, QComboBox,
     QPushButton, QTextEdit, QSpinBox, QDoubleSpinBox, QDateEdit, QCheckBox,
     QGridLayout, QVBoxLayout, QHBoxLayout, QSplitter, QMessageBox,
     QDialogButtonBox, QAction
 )
-from PyQt5.QtGui     import QTextCursor, QTextCharFormat, QColor, QTextDocument
-from Crypto.Cipher   import DES3
-from Crypto.Hash     import SHA256
+from PyQt5.QtGui import QTextCursor, QTextCharFormat, QColor
+from Crypto.Cipher import DES3
+from Crypto.Hash import SHA256
 
 
-# ───────────────────────── helpers ────────────────────────────────────────
+# ───────────────────────── helpers ─────────────────────────
 def rand_session() -> str:
+    """16‑digit numeric session ID."""
     return ''.join(random.choice('0123456789') for _ in range(16))
 
 
-def des3_decrypt(ktk: str, mac_b64: str) -> str:
-    if len(ktk) != 16:
-        raise ValueError("KTK must be exactly 16 ASCII characters.")
-    payload = b64decode(mac_b64)
-    key24   = DES3.adjust_key_parity(ktk.encode() + ktk.encode()[:8])
-    return DES3.new(key24, DES3.MODE_ECB).decrypt(payload).rstrip(b'\0').decode()
-
-
-def calc_mac(xml_wo: str, mac_key: str) -> str:
-    """Return Base‑64 SHA‑256 MAC."""
-    return b64encode(SHA256.new((xml_wo + mac_key).encode()).digest()).decode()
-
-
-def to_minor(val: float) -> str:        # e.g. ₪10.00 → "1000"
+def to_minor(val: float) -> str:
+    """10.00 → '1000' (cents / agorot)."""
     return str(int(round(val * 100)))
 
 
-# ───────────────────────── threaded socket ────────────────────────────────
+def pad_payments(n: int) -> str:
+    """Left‑pad payments number to two digits: 2 → '02'."""
+    return f"{n:02d}"
+
+
+def des3_decrypt(ktk: str, mac_b64: str) -> str:
+    """Decrypt Base64 MAC‑key with ASCII‑16 KTK."""
+    if len(ktk) != 16:
+        raise ValueError("KTK must be exactly 16 ASCII chars")
+    key24 = DES3.adjust_key_parity(ktk.encode() + ktk.encode()[:8])
+    return DES3.new(key24, DES3.MODE_ECB).decrypt(b64decode(mac_b64)).rstrip(b'\0').decode()
+
+
+def calc_mac(xml_wo: str, mac_key: str) -> str:
+    """SHA‑256‑then‑Base64 MAC."""
+    return b64encode(SHA256.new((xml_wo + mac_key).encode()).digest()).decode()
+
+
+# ───────────────── threaded socket sender ─────────────────
 class SockThread(QThread):
-    result = pyqtSignal(str, str)
+    result = pyqtSignal(str, str)          # sentXML, recvXML
 
     def __init__(self, ip: str, port: int, msg: str):
         super().__init__()
@@ -69,12 +81,13 @@ class SockThread(QThread):
         self.result.emit(sent, received)
 
 
-# ───────────────────────── dialogs (unchanged) ────────────────────────────
+# ───────────────────── dialogs ────────────────────────────
 class StartTransactionDlg(QDialog):
+    """SESSION/START_TRAN convenience dialog."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Start Transaction")
-        g = QGridLayout(self)
+        grid = QGridLayout(self)
 
         self.inv   = QLineEdit("100000")
         self.cash  = QLineEdit()
@@ -84,20 +97,23 @@ class StartTransactionDlg(QDialog):
         self.pos_port = QLineEdit()
 
         for row, (lbl, w) in enumerate((
-            ("Invoice",      self.inv),
-            ("Cashier ID",   self.cash),
-            ("Shift ID",     self.shift),
-            ("Business Date", self.date),
-            ("POS IP",      self.pos_ip),
-            ("POS Port",    self.pos_port)
+            ("Invoice",           self.inv),
+            ("Cashier ID",        self.cash),
+            ("Shift ID",          self.shift),
+            ("Business Date",     self.date),
+            ("POS IP (opt.)",     self.pos_ip),
+            ("POS Port (opt.)",   self.pos_port),
         )):
-            g.addWidget(QLabel(lbl), row, 0); g.addWidget(w, row, 1)
+            grid.addWidget(QLabel(lbl), row, 0)
+            grid.addWidget(w,           row, 1)
 
-        g.addWidget(QLabel("* all fields optional"), 6, 0, 1, 2)
+        grid.addWidget(QLabel("* all fields optional"), 6, 0, 1, 2)
+
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.button(QDialogButtonBox.Ok).setText("Start")
-        box.accepted.connect(self.accept); box.rejected.connect(self.reject)
-        g.addWidget(box, 7, 0, 1, 2)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        grid.addWidget(box, 7, 0, 1, 2)
 
     def data(self) -> Dict[str, str]:
         return {k: v for k, v in {
@@ -106,24 +122,128 @@ class StartTransactionDlg(QDialog):
             'SHIFT_ID'    : str(self.shift.value()) if self.shift.value() else '',
             'BUSINESSDATE': self.date.date().toString("yyyyMMdd"),
             'POS_IP'      : self.pos_ip.text().strip(),
-            'POS_PORT'    : self.pos_port.text().strip()
+            'POS_PORT'    : self.pos_port.text().strip(),
         }.items() if v}
 
 
 class DiscoverDlg(QDialog):
-    """Same as before – unchanged, leaving out for brevity (no functional change)."""
-    # … code identical to previous version …
+    """PAYMENT/DISCOVERY long‑form dialog (unchanged logic)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Discover – Read Card")
+        g = QGridLayout(self); r = 0
+
+        g.addWidget(QLabel("Timeout (s)"), r, 0)
+        self.timeout = QSpinBox(minimum=5, maximum=999, value=60)
+        g.addWidget(self.timeout, r, 1); r += 1
+
+        self.manual = QCheckBox("Manual card entry")
+        g.addWidget(self.manual, r, 0)
+        self.man_reason = QComboBox()
+        self.man_reason.addItems(["SIG", "CNP"])
+        self.man_reason.setEnabled(False)
+        g.addWidget(self.man_reason, r, 1); r += 1
+        self.manual.toggled.connect(self.man_reason.setEnabled)
+
+        g.addWidget(QLabel("Transaction type"), r, 0)
+        self.tran_type = QComboBox()
+        self.tran_type.addItems(
+            ["01 Regular Charge", "02 Unload Prepaid", "03 Force Charge",
+             "06 Charge with CashBack", "30 Balance inquiry",
+             "53 Refund", "55 Load Prepaid"]
+        )
+        g.addWidget(self.tran_type, r, 1); r += 1
+
+        g.addWidget(QLabel("Bill amount (₪)"), r, 0)
+        self.amount = QDoubleSpinBox(decimals=2, maximum=999999, value=10.00)
+        g.addWidget(self.amount, r, 1)
+        g.addWidget(QLabel("Currency"), r, 2)
+        self.currency = QComboBox(); self.currency.addItems(["376 NIS", "840 USD", "978 EUR"])
+        g.addWidget(self.currency, r, 3); r += 1
+
+        self.cash_chk = QCheckBox("Cash amount?")
+        g.addWidget(self.cash_chk, r, 0)
+        self.cash_amt = QDoubleSpinBox(decimals=2, maximum=999999); self.cash_amt.setEnabled(False)
+        g.addWidget(self.cash_amt, r, 1); r += 1
+        self.cash_chk.toggled.connect(self.cash_amt.setEnabled)
+
+        self.fx_chk = QCheckBox("Convert currency?")
+        g.addWidget(self.fx_chk, r, 0)
+        self.fx_to  = QComboBox(); self.fx_to.addItems(["376 NIS", "840 USD", "978 EUR"])
+        self.fx_to.setEnabled(False)
+        self.fx_amt = QDoubleSpinBox(decimals=2, maximum=999999)
+        self.fx_amt.setEnabled(False)
+        g.addWidget(QLabel("Convert to"), r, 2)
+        g.addWidget(self.fx_to, r, 3); r += 1
+        g.addWidget(QLabel("Converted amount"), r, 2)
+        g.addWidget(self.fx_amt, r, 3); r += 1
+        self.fx_chk.toggled.connect(lambda b: [w.setEnabled(b) for w in (self.fx_to, self.fx_amt)])
+
+        g.addWidget(QLabel("Generate card token?"), r, 0)
+        self.gen_token = QComboBox(); self.gen_token.addItems(["0 None", "1 All cards", "2 Shufersal only"])
+        g.addWidget(self.gen_token, r, 1); r += 1
+
+        self.use_tok = QCheckBox("Use existing token")
+        g.addWidget(self.use_tok, r, 0)
+        self.tok_val = QLineEdit(); self.tok_val.setEnabled(False)
+        g.addWidget(self.tok_val, r, 1); r += 1
+        self.use_tok.toggled.connect(self.tok_val.setEnabled)
+
+        g.addWidget(QLabel("Service type"), r, 0)
+        self.service = QComboBox(); self.service.addItems(["", "1", "2", "3"])
+        g.addWidget(self.service, r, 1); r += 1
+
+        self.ctls  = QCheckBox("Enable CTLS");  self.ctls.setChecked(True)
+        self.allow = QCheckBox("Allow cancel"); self.allow.setChecked(True)
+        self.unatt = QCheckBox("Unattended POS")
+        g.addWidget(self.ctls, r, 0)
+        g.addWidget(self.allow, r, 1)
+        g.addWidget(self.unatt, r, 2); r += 1
+
+        g.addWidget(QLabel("Operation"), r, 0)
+        self.op = QComboBox()
+        self.op.addItems(["03 Inquiry", "04 Execute transaction", "05 Authorize only", "06 Capture only"])
+        g.addWidget(self.op, r, 1); r += 1
+
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        box.button(QDialogButtonBox.Ok).setText("Discover")
+        box.accepted.connect(self.accept); box.rejected.connect(self.reject)
+        g.addWidget(box, r, 0, 1, 4)
+
+    def data(self) -> Dict[str, Optional[str]]:
+        return {
+            'timeout': str(self.timeout.value()),
+            'restrict_token': self.gen_token.currentText().split()[0],
+            'manual': self.manual.isChecked(),
+            'manual_reason': self.man_reason.currentText() if self.manual.isChecked() else '',
+            'tran_type': self.tran_type.currentText().split()[0],
+            'amount': to_minor(self.amount.value()),
+            'currency': self.currency.currentText().split()[0],
+            'cash': to_minor(self.cash_amt.value()) if self.cash_chk.isChecked() else None,
+            'fx': self.fx_chk.isChecked(),
+            'fx_to': self.fx_to.currentText().split()[0] if self.fx_chk.isChecked() else '',
+            'fx_amt': to_minor(self.fx_amt.value()) if self.fx_chk.isChecked() else None,
+            'use_token': self.use_tok.isChecked(),
+            'token_val': self.tok_val.text().strip(),
+            'service_type': self.service.currentText(),
+            'ctls': self.ctls.isChecked(),
+            'allow_cancel': self.allow.isChecked(),
+            'unattended': self.unatt.isChecked(),
+            'operation': self.op.currentText().split()[0],
+        }
 
 
-# ───────────────────────── main window ────────────────────────────────────
+# ──────────────────── main window ────────────────────────
 class Main(QMainWindow):
-    TX_TYPES   = ["01 Regular Charge", "02 Unload Prepaid", "03 Force Charge",
-                  "06 Charge with CashBack", "07 Cash Withdrawal",
-                  "11 Standing Order", "30 Balance inquiry", "53 Refund", "55 Load Prepaid"]
-
-    CREDIT_TERMS = ["01 Regular Term", "02 Special Term (Adif / +30)",
-                    "03 Debit", "06 Credit Installment", "08 Installment"]
-
+    TX_TYPES = [
+        "01 Regular Charge", "02 Unload Prepaid", "03 Force Charge",
+        "06 Charge with CashBack", "07 Cash Withdrawal", "11 Standing Order",
+        "30 Balance inquiry", "53 Refund", "55 Load Prepaid"
+    ]
+    CREDIT_TERMS = [
+        "01 Regular Term", "02 Special Term (Adif / +30)",
+        "03 Debit", "06 Credit Installment", "08 Installment"
+    ]
     CURRENCIES = ["376 NIS", "840 USD", "978 EUR"]
 
     def __init__(self):
@@ -136,7 +256,7 @@ class Main(QMainWindow):
         self.threads: List[QThread] = []
         self.qs_queue: List[Tuple[str, str, str]] = []
 
-        # ───── UI build ────────────────────────────────────────────────────
+        # ─ build UI ─
         central = QWidget(); lay = QVBoxLayout(central)
 
         # connection row
@@ -153,53 +273,60 @@ class Main(QMainWindow):
         self.lane  = QLineEdit("074");   self.alt   = QLineEdit("012345678")
         self.pos_type = QComboBox(); self.pos_type.addItems(["ATTENDED", "UNATTENDED"])
         for lbl, w in (("Chain", self.chain), ("Store", self.store),
-                       ("Lane",  self.lane),  ("Alt‑ID", self.alt)):
+                       ("Lane", self.lane), ("Alt‑ID", self.alt)):
             rr.addWidget(QLabel(lbl)); rr.addWidget(w)
         rr.addWidget(QLabel("POS Type")); rr.addWidget(self.pos_type)
         self.reg_btn = QPushButton("Register", clicked=self.cmd_register)
         rr.addWidget(self.reg_btn)
         lay.addLayout(rr)
 
-        # key row
+        # keys row
         kr = QHBoxLayout()
         kr.addWidget(QLabel("KTK (16)"))
         self.ktk_edit = QLineEdit(); self.ktk_edit.setEnabled(False); kr.addWidget(self.ktk_edit)
-        self.key_btn  = QPushButton("Exchange Keys", clicked=self.cmd_keys); self.key_btn.setEnabled(False)
+        self.key_btn = QPushButton("Exchange Keys", clicked=self.cmd_keys); self.key_btn.setEnabled(False)
         kr.addWidget(self.key_btn); kr.addStretch(); lay.addLayout(kr)
 
-        # MAC view
-        mr = QHBoxLayout()
-        mr.addWidget(QLabel("MAC Key"))
-        self.mac_view = QLineEdit(); self.mac_view.setReadOnly(True); mr.addWidget(self.mac_view)
-        mr.addStretch(); lay.addLayout(mr)
+        # MAC row
+        mac_row = QHBoxLayout()
+        mac_row.addWidget(QLabel("MAC Key"))
+        self.mac_view = QLineEdit(); self.mac_view.setReadOnly(True)
+        mac_row.addWidget(self.mac_view); mac_row.addStretch()
+        lay.addLayout(mac_row)
 
-        # Quick‑Sale row  (new widgets here!)
-        br = QHBoxLayout()
-        self.start_btn = QPushButton("Start Tran…", clicked=self.do_start); self.start_btn.setEnabled(False)
-        self.disc_btn  = QPushButton("Discover…",  clicked=self.do_discover); self.disc_btn.setEnabled(False)
-        br.addWidget(self.start_btn); br.addWidget(self.disc_btn)
+        # Quick‑Sale row with new installments widgets
+        qs = QHBoxLayout()
+        self.start_btn = QPushButton("Start Tran…", enabled=False, clicked=self.do_start)
+        self.disc_btn  = QPushButton("Discover…",  enabled=False, clicked=self.do_discover)
+        qs.addWidget(self.start_btn); qs.addWidget(self.disc_btn)
 
-        # amount
-        br.addWidget(QLabel("Amount ₪"))
+        qs.addWidget(QLabel("Amount ₪"))
         self.qs_amt = QDoubleSpinBox(decimals=2, maximum=999999, value=10.00)
-        br.addWidget(self.qs_amt)
+        qs.addWidget(self.qs_amt)
 
-        # NEW: Tx‑type, Credit‑term, Currency combos
-        br.addWidget(QLabel("Tx‑Type"))
+        qs.addWidget(QLabel("Tx‑Type"))
         self.qs_tx = QComboBox(); self.qs_tx.addItems(self.TX_TYPES)
-        br.addWidget(self.qs_tx)
+        qs.addWidget(self.qs_tx)
 
-        br.addWidget(QLabel("Credit Term"))
+        qs.addWidget(QLabel("Credit Term"))
         self.qs_credit = QComboBox(); self.qs_credit.addItems(self.CREDIT_TERMS)
-        br.addWidget(self.qs_credit)
+        qs.addWidget(self.qs_credit)
 
-        br.addWidget(QLabel("Currency"))
+        qs.addWidget(QLabel("Currency"))
         self.qs_curr = QComboBox(); self.qs_curr.addItems(self.CURRENCIES)
-        br.addWidget(self.qs_curr)
+        qs.addWidget(self.qs_curr)
 
-        self.quick_btn = QPushButton("Quick Sale", clicked=self.quick_sale); self.quick_btn.setEnabled(False)
-        br.addWidget(self.quick_btn); br.addStretch()
-        lay.addLayout(br)
+        # installments widgets – hidden unless term 06/08
+        self.inst_lbl = QLabel("Inst.")
+        self.inst_spin = QSpinBox(minimum=2, maximum=999, value=2)
+        self.inst_lbl.hide(); self.inst_spin.hide()
+        qs.addWidget(self.inst_lbl); qs.addWidget(self.inst_spin)
+
+        self.qs_credit.currentIndexChanged.connect(self._toggle_installments)
+
+        self.quick_btn = QPushButton("Quick Sale", enabled=False, clicked=self.quick_sale)
+        qs.addWidget(self.quick_btn); qs.addStretch()
+        lay.addLayout(qs)
 
         # admin row
         ar = QHBoxLayout()
@@ -209,20 +336,22 @@ class Main(QMainWindow):
         ar.addWidget(self.cmd_in); ar.addWidget(self.cmd_send); ar.addStretch()
         lay.addLayout(ar)
 
-        self.status_btn = QPushButton("Status", clicked=self.cmd_status); self.status_btn.setEnabled(False)
+        self.status_btn = QPushButton("Status", enabled=False, clicked=self.cmd_status)
         lay.addWidget(self.status_btn)
 
-        # logs
+        # logs splitter
         self.sent = QTextEdit(readOnly=True); self.recv = QTextEdit(readOnly=True)
-        sp = QSplitter(Qt.Horizontal); sp.addWidget(self.sent); sp.addWidget(self.recv)
-        lay.addWidget(sp)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self.sent); splitter.addWidget(self.recv)
+        lay.addWidget(splitter)
 
-        # search
+        # search row
         srow = QHBoxLayout()
         srow.addWidget(QLabel("Search logs:"))
         self.search_edit = QLineEdit(); self.search_edit.returnPressed.connect(self.search_logs)
         self.search_btn  = QPushButton("Find", clicked=self.search_logs)
-        srow.addWidget(self.search_edit); srow.addWidget(self.search_btn); srow.addStretch(); lay.addLayout(srow)
+        srow.addWidget(self.search_edit); srow.addWidget(self.search_btn); srow.addStretch()
+        lay.addLayout(srow)
 
         act = QAction(self); act.setShortcut("Ctrl+F")
         act.triggered.connect(lambda: self.search_edit.setFocus(Qt.ShortcutFocusReason))
@@ -230,11 +359,19 @@ class Main(QMainWindow):
 
         lay.addWidget(QPushButton("Clear logs",
                                   clicked=lambda: (self.sent.clear(), self.recv.clear())))
-        self.setCentralWidget(central)
 
+        self.setCentralWidget(central)
         self._load_mac()
 
-    # ───── persistence ────────────────────────────────────────────────────
+    # ────────── UI helpers ──────────
+    def _toggle_installments(self):
+        """Show spin‑box when '06' or '08' selected."""
+        code = self.qs_credit.currentText().split()[0]
+        show = code in ('06', '08')
+        self.inst_lbl.setVisible(show)
+        self.inst_spin.setVisible(show)
+
+    # ────────── persistence ──────────
     def _load_mac(self):
         if os.path.exists("mac.txt"):
             self.mac_key = open("mac.txt").read().strip()
@@ -243,28 +380,32 @@ class Main(QMainWindow):
                 for b in (self.status_btn, self.start_btn, self.disc_btn, self.quick_btn):
                     b.setEnabled(True)
 
-    def _save_mac(self): open("mac.txt", "w").write(self.mac_key)
+    def _save_mac(self):
+        open("mac.txt", "w").write(self.mac_key)
 
-    # ───── XML helpers ────────────────────────────────────────────────────
+    # ────────── XML helpers ──────────
     def _env(self, fg: str, cmd: str, body: str = "") -> str:
         ts = datetime.now(timezone.utc).strftime("%m.%d.%Y %H:%M:%S UTC")
-        hdr   = (f"<TRANSACTION><FUNCTION_GROUP>{fg}</FUNCTION_GROUP>"
-                 f"<COMMAND>{cmd}</COMMAND><SESSION_ID>{self.session}</SESSION_ID>"
-                 f"<TRAINING_MODE>0</TRAINING_MODE><TRANSACTION_TIME>{ts}</TRANSACTION_TIME>")
+        hdr = (f"<TRANSACTION><FUNCTION_GROUP>{fg}</FUNCTION_GROUP>"
+               f"<COMMAND>{cmd}</COMMAND><SESSION_ID>{self.session}</SESSION_ID>"
+               f"<TRAINING_MODE>0</TRAINING_MODE>"
+               f"<TRANSACTION_TIME>{ts}</TRANSACTION_TIME>")
         xml_wo = hdr + body + "<MAC></MAC></TRANSACTION>"
-        mac    = calc_mac(xml_wo, self.mac_key) if self.mac_key else ''
+        mac = calc_mac(xml_wo, self.mac_key) if self.mac_key else ''
         return hdr + body + f"<MAC>{mac}</MAC></TRANSACTION>"
 
     def _send(self, xml: str):
         try:
             port = int(self.port.text())
         except ValueError:
-            QMessageBox.critical(self, "Port", "Invalid port value."); return
-        th = SockThread(self.ip.text().strip(), port, xml)
-        th.result.connect(self._handle); th.finished.connect(lambda: self.threads.remove(th))
-        self.threads.append(th); th.start()
+            QMessageBox.critical(self, "Port", "Invalid port value"); return
+        t = SockThread(self.ip.text().strip(), port, xml)
+        t.result.connect(self._handle)
+        t.finished.connect(lambda: self.threads.remove(t))
+        self.threads.append(t); t.start()
 
     def _disc_body(self, d: Dict[str, Optional[str]]) -> str:
+        """Build <TIMEOUT> and <TRANSACTION_DETAILS> with optional PAYMENTS_NUMBER."""
         x = (f"<TRANSACTION_DETAILS>"
              f"<RESTRICT_TOKEN>{d['restrict_token']}</RESTRICT_TOKEN>"
              f"<MANUAL>{int(d['manual'])}</MANUAL>"
@@ -275,6 +416,7 @@ class Main(QMainWindow):
              f"<MTI>100</MTI><ENTRY_MODE>04</ENTRY_MODE>"
              f"<TRANSACTION_AMOUNT>{d['amount']}</TRANSACTION_AMOUNT>"
              f"<ORIGINAL_CURRENCY>{d['currency']}</ORIGINAL_CURRENCY>")
+        # optional sections
         if d['manual'] and d['manual_reason']:
             x += f"<MANUAL_REASON>{d['manual_reason']}</MANUAL_REASON>"
         if d['cash'] is not None:
@@ -288,14 +430,18 @@ class Main(QMainWindow):
             x += f"<SERVICE_TYPE>{d['service_type']}</SERVICE_TYPE>"
         if d.get('credit_term'):
             x += f"<CREDIT_TERMS>{d['credit_term']}</CREDIT_TERMS>"
+        if d.get('payments'):
+            x += f"<PAYMENTS_NUMBER>{d['payments']}</PAYMENTS_NUMBER>"
         x += f"<OPERATION>{d['operation']}</OPERATION></TRANSACTION_DETAILS>"
         return f"<TIMEOUT>{d['timeout']}</TIMEOUT>" + x
 
-    # ───── button slots ───────────────────────────────────────────────────
+    # ────────── button slots ──────────
     def cmd_register(self):
         self.session = rand_session()
-        body = (f"<CHAIN>{self.chain.text()}</CHAIN><STORE>{self.store.text()}</STORE>"
-                f"<LANE>{self.lane.text()}</LANE><TERMINAL_ID>{self.alt.text()}</TERMINAL_ID>"
+        body = (f"<CHAIN>{self.chain.text()}</CHAIN>"
+                f"<STORE>{self.store.text()}</STORE>"
+                f"<LANE>{self.lane.text()}</LANE>"
+                f"<TERMINAL_ID>{self.alt.text()}</TERMINAL_ID>"
                 f"<POS_TYPE>{self.pos_type.currentText()}</POS_TYPE>")
         self._send(self._env("ADMIN", "REGISTER", body))
 
@@ -303,7 +449,8 @@ class Main(QMainWindow):
         self.ktk = self.ktk_edit.text().strip()
         self._send(self._env("ADMIN", "EXCHANGE_KEYS", f"<KTK>{self.ktk}</KTK>"))
 
-    def cmd_status(self): self._send(self._env("ADMIN", "STATUS"))
+    def cmd_status(self):
+        self._send(self._env("ADMIN", "STATUS"))
 
     def do_start(self):
         dlg = StartTransactionDlg(self)
@@ -318,18 +465,15 @@ class Main(QMainWindow):
             return
         self._send(self._env("PAYMENT", "DISCOVERY", self._disc_body(dlg.data())))
 
-    # ───── QUICK SALE  ────────────────────────────────────────────────────
+    # ───── Quick‑Sale automated flow ─────
     def quick_sale(self):
-        amt_minor   = to_minor(self.qs_amt.value())
-        tran_type   = self.qs_tx.currentText().split()[0]
+        amt_minor = to_minor(self.qs_amt.value())
+        tran_type = self.qs_tx.currentText().split()[0]
         credit_term = self.qs_credit.currentText().split()[0]
-        currency    = self.qs_curr.currentText().split()[0]
+        currency = self.qs_curr.currentText().split()[0]
 
-        # Start‑Transaction body (very small subset)
-        start_body = (f"<INVOICE>100000</INVOICE>"
-                      f"<POS_TYPE>{self.pos_type.currentText()}</POS_TYPE>")
+        payments = pad_payments(self.inst_spin.value()) if credit_term in ('06', '08') else None
 
-        # default discovery / authorize dict
         defaults: Dict[str, Optional[str]] = {
             'timeout': '60',
             'restrict_token': '0',
@@ -350,14 +494,14 @@ class Main(QMainWindow):
             'unattended': False,
             'operation': '04',
             'credit_term': credit_term,
+            'payments': payments,
         }
 
         disc_body = self._disc_body(defaults)
-        auth_body = self._disc_body(defaults)  # same details + CREDIT_TERMS
+        auth_body = self._disc_body(defaults)
 
-        # queue the four‑step quick‑sale
         self.qs_queue = [
-            ("SESSION", "START_TRAN",  start_body),
+            ("SESSION", "START_TRAN",  "<INVOICE>100000</INVOICE>"),
             ("PAYMENT", "DISCOVERY",   disc_body),
             ("PAYMENT", "AUTHORIZE",   auth_body),
             ("SESSION", "FINISH_TRAN", ""),
@@ -365,13 +509,12 @@ class Main(QMainWindow):
         fg, cmd, body = self.qs_queue.pop(0)
         self._send(self._env(fg, cmd, body))
 
-    # admin quick commands
     def admin_cmd(self):
         cmd = self.cmd_in.text().strip().upper()
         if cmd:
             self._send(self._env("ADMIN", cmd))
 
-    # ───── search / highlight ─────────────────────────────────────────────
+    # ────────── log search & highlight ──────────
     def search_logs(self):
         term = self.search_edit.text()
         for pane in (self.sent, self.recv):
@@ -382,7 +525,8 @@ class Main(QMainWindow):
         pane.setExtraSelections([])
         if not word:
             return
-        sels, doc = [], pane.document(); cur = QTextCursor(doc)
+        sels, doc = [], pane.document()
+        cur = QTextCursor(doc)
         while True:
             cur = doc.find(word, cur)
             if cur.isNull():
@@ -392,50 +536,49 @@ class Main(QMainWindow):
             sel.format = fmt; sels.append(sel)
         pane.setExtraSelections(sels)
 
-    # ───── response handler & queue engine ────────────────────────────────
+    # ────────── response handler & queue ──────────
     def _handle(self, sent_xml: str, recv_xml: str):
         self.sent.append(sent_xml)
         self.recv.append(recv_xml)
 
-        # quick‑sale engine
+        # Quick‑Sale chain
         if self.qs_queue:
-            ok = ('<RESULT_CODE>0<' in recv_xml) or ('<EVENT>COMPLETED' in recv_xml)
-            if ok:
+            success = ('<RESULT_CODE>0<' in recv_xml) or ('<EVENT>COMPLETED' in recv_xml)
+            if success:
+                # show receipt after AUTHORIZE
                 if ('<COMMAND>AUTHORIZE' in sent_xml and
                         '<RESULT_CODE>0<' in recv_xml and
                         (m := re.search(r'<RECEIPT_ARR>(.*?)</RECEIPT_ARR>', recv_xml, re.S))):
-                    QMessageBox.information(self, "Receipt",
-                                            html.unescape(m.group(1).strip()))
+                    QMessageBox.information(self, "Receipt", html.unescape(m.group(1).strip()))
                 if self.qs_queue:
                     fg, cmd, body = self.qs_queue.pop(0)
                     self._send(self._env(fg, cmd, body))
             else:
-                self.qs_queue.clear()     # break the chain on first error
+                self.qs_queue.clear()   # break the flow on first error
 
-        # enable key‑exchange after register
+        # enable key exchange after register
         if '<COMMAND>REGISTER' in sent_xml and '<EVENT>COMPLETED' in recv_xml:
             self.ktk_edit.setEnabled(True); self.key_btn.setEnabled(True)
 
-        # pull MAC‑key after exchange_keys
+        # decode MAC‑key after EXCHANGE_KEYS
         if '<COMMAND>EXCHANGE_KEYS' in sent_xml and '<MAC_KEY>' in recv_xml:
             if (m := re.search(r'<MAC_KEY>([^<]+)</MAC_KEY>', recv_xml)):
                 try:
                     self.mac_key = des3_decrypt(self.ktk, m.group(1))
                     self.mac_view.setText(self.mac_key); self._save_mac()
-                    for b in (self.status_btn, self.start_btn,
-                              self.disc_btn, self.quick_btn):
+                    for b in (self.status_btn, self.start_btn, self.disc_btn, self.quick_btn):
                         b.setEnabled(True)
                 except Exception as e:
                     QMessageBox.critical(self, "Decrypt error", str(e))
 
-    # ───── clean shutdown ────────────────────────────────────────────────
+    # ────────── cleanup ──────────
     def closeEvent(self, ev):
         for t in self.threads:
             t.quit(); t.wait()
         ev.accept()
 
 
-# ───────────────────────── run ───────────────────────────────────────────
+# ─────────────────── run ───────────────────
 if __name__ == "__main__":
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     app = QApplication(sys.argv)
