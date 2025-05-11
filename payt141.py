@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Verifone P400 connector – Quick-Sale flow, webhook trigger & Hebrew receipts
-# 2025-05-08  v1.38  (complete standalone source)
+# 2025-05-11  v1.41  (credit-term dialog always, plus UI switch for TRAINING_MODE)
 #
-# • RESULT_CODE 2  → 2-second GENERAL/CANCEL  → SESSION/FINISH_TRAN.
-# • CANCEL result codes 0 / 50 / 51 are considered success.
-# • Quick-Sale allocates a random 16-digit SESSION_ID when none exists.
-# • Every successful PAYMENT/AUTHORIZE (RESULT_CODE 0) produces a UTF-8
+# • RESULT_CODE 2  → 2-second GENERAL/CANCEL  → SESSION/FINISH_TRAN
+# • CANCEL result codes 0 / 50 / 51 are considered success
+# • Quick-Sale allocates a random 16-digit SESSION_ID when none exists
+# • Every successful PAYMENT/AUTHORIZE (RESULT_CODE 0) writes a UTF-8
 #   Hebrew receipt in ./receipts/‎YYMMDD_HHMMSS_receipt.txt
+# • New: check “Training mode” to send <TRAINING_MODE>1</TRAINING_MODE>
 
-import sys, os, socket, html, random, re
+import sys, os, socket, random, re, html
 from datetime   import datetime, timezone
 from base64     import b64decode, b64encode
 from typing     import Dict, List, Optional, Tuple
@@ -27,21 +28,21 @@ from Crypto.Hash     import SHA256
 from http.server     import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse    import urlparse, parse_qs
 
-# ─────────────────────── helpers ───────────────────────
+# ───────────────────── helpers ─────────────────────
 VALID_TYPES = {'01','02','03','06','30','53','55'}
-
-def rand_session() -> str: return ''.join(random.choice('0123456789') for _ in range(16))
-def to_minor(val: float) -> str: return str(int(round(val*100)))
-def calc_mac(xml: str, key: str) -> str: return b64encode(SHA256.new((xml+key).encode()).digest()).decode()
+rand_session = lambda: ''.join(random.choice('0123456789') for _ in range(16))
+to_minor     = lambda v: str(int(round(v*100)))
+calc_mac     = lambda xml,key: b64encode(SHA256.new((xml+key).encode()).digest()).decode()
 
 def des3_decrypt(ktk: str, mac_b64: str) -> str:
-    if len(ktk) != 16: raise ValueError("KTK must be 16 ASCII chars")
-    key24 = DES3.adjust_key_parity(ktk.encode()+ktk.encode()[:8])
+    if len(ktk) != 16:
+        raise ValueError("KTK must be 16 ASCII chars")
+    key24 = DES3.adjust_key_parity(ktk.encode() + ktk.encode()[:8])
     return DES3.new(key24, DES3.MODE_ECB).decrypt(b64decode(mac_b64)).rstrip(b'\0').decode()
 
-# ─────────────────────── threaded I/O ───────────────────────
+# ───────────────────── threaded I/O ─────────────────────
 class SockThread(QThread):
-    result = pyqtSignal(str,str)                     # sent-xml, recv-xml
+    result = pyqtSignal(str, str)           # sent-xml, recv-xml
     def __init__(self, ip:str, port:int, msg:str):
         super().__init__(); self.ip,self.port,self.msg = ip,port,msg
     def run(self):
@@ -61,7 +62,7 @@ class SockThread(QThread):
         self.result.emit(sent, recv)
 
 class WebhookServer(QThread):
-    receivedPayment = pyqtSignal(float,str)          # amount, type
+    receivedPayment = pyqtSignal(float, str)   # amount, type
     def __init__(self, host='localhost', port=8080, parent=None):
         super().__init__(parent); self.host,self.port = host,port
     def run(self):
@@ -72,30 +73,25 @@ class WebhookServer(QThread):
                 if p.path!='/pay': return self._r(404,b"Not Found")
                 q=parse_qs(p.query)
                 if 'amount' not in q: return self._r(400,b"amount param required")
-                try:
-                    amt=float(q['amount'][0]); assert amt>0
-                except Exception:
-                    return self._r(400,b"amount must be positive")
+                try: amt=float(q['amount'][0]); assert amt>0
+                except Exception: return self._r(400,b"amount must be positive")
                 code=q.get('type',['01'])[0]
                 if code not in VALID_TYPES: return self._r(400,b"invalid type")
                 self._r(200,b"OK"); outer.receivedPayment.emit(amt,code)
             def log_message(self,*_): return
             def _r(self,c,b):
-                self.send_response(c)
-                self.send_header("Content-Type","text/plain")
-                self.send_header("Content-Length",str(len(b)))
-                self.end_headers(); self.wfile.write(b)
+                self.send_response(c); self.send_header("Content-Type","text/plain")
+                self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
         srv=HTTPServer((self.host,self.port),H); srv.allow_reuse_address=True
         try: srv.serve_forever()
         finally: srv.server_close()
 
-# ─────────────────────── dialogs ───────────────────────
+# ───────────────────── dialogs ─────────────────────
 class CreditTermDlg(QDialog):
-    _map={'01 רגילה':'1','02 דחויה(+30)':'2','03 מיידית':'3',
-          '06 אשראי':'6','08 תשלומים':'8'}
+    _map = {'01 רגילה':'1','02 דחויה(+30)':'2','03 מיידית':'3',
+            '06 אשראי':'6','08 תשלומים':'8'}
     def __init__(self, flags:Dict[str,bool], mn:int, mx:int, total:float, parent=None):
-        super().__init__(parent); self.total=total
-        self.setWindowTitle("בחירת אשראי / תשלומים")
+        super().__init__(parent); self.total=total; self.setWindowTitle("בחירת אשראי / תשלומים")
         g=QGridLayout(self); r=0
         g.addWidget(QLabel("אפשרויות נתמכות:"),r,0,1,2); r+=1
         self.cmb=QComboBox()
@@ -107,7 +103,8 @@ class CreditTermDlg(QDialog):
         self.pay_lbl,self.pay_spin = QLabel("מס׳ תשלומים:"), QSpinBox(minimum=mn,maximum=mx,value=mn)
         g.addWidget(self.pay_lbl,r,0); g.addWidget(self.pay_spin,r,1); r+=1
         self.first_lbl,self.first_spin = QLabel("תשלום ראשון ₪:"), QDoubleSpinBox(decimals=2,maximum=total,value=total/mn)
-        self.next_lbl,self.next_spin = QLabel("תשלום המשך ₪:"), QDoubleSpinBox(decimals=2,maximum=total,value=self.first_spin.value()); self.next_spin.setReadOnly(True)
+        self.next_lbl,self.next_spin  = QLabel("תשלום המשך ₪:"), QDoubleSpinBox(decimals=2,maximum=total,value=self.first_spin.value())
+        self.next_spin.setReadOnly(True)
         g.addWidget(self.first_lbl,r,0); g.addWidget(self.first_spin,r,1); r+=1
         g.addWidget(self.next_lbl,r,0); g.addWidget(self.next_spin,r,1); r+=1
         self.cmb.currentIndexChanged.connect(self._toggle)
@@ -119,7 +116,8 @@ class CreditTermDlg(QDialog):
         g.addWidget(box,r,0,1,2)
     def _toggle(self,*_):
         vis=self.cmb.currentData() in ('6','8')
-        for w in (self.pay_lbl,self.pay_spin,self.first_lbl,self.first_spin,self.next_lbl,self.next_spin): w.setVisible(vis)
+        for w in (self.pay_lbl,self.pay_spin,self.first_lbl,self.first_spin,
+                  self.next_lbl,self.next_spin): w.setVisible(vis)
         self._recalc()
     def _recalc(self,*_):
         if not self.first_spin.isVisible(): return
@@ -132,9 +130,8 @@ class CreditTermDlg(QDialog):
 
 class StartTransactionDlg(QDialog):
     def __init__(self,parent=None):
-        super().__init__(parent); self.setWindowTitle("Start Transaction")
-        g=QGridLayout(self)
-        self.inv=QLineEdit("100000"); self.cash=QLineEdit()
+        super().__init__(parent); self.setWindowTitle("Start Transaction"); g=QGridLayout(self)
+        self.inv,self.cash=QLineEdit("100000"),QLineEdit()
         self.shift=QSpinBox(minimum=0,maximum=9999,value=1)
         self.date=QDateEdit(calendarPopup=True); self.date.setDate(QDate.currentDate())
         self.pos_ip,self.pos_port=QLineEdit(),QLineEdit()
@@ -156,8 +153,7 @@ class StartTransactionDlg(QDialog):
 
 class DiscoverDlg(QDialog):
     def __init__(self,parent=None):
-        super().__init__(parent); self.setWindowTitle("Discover – Read Card")
-        g=QGridLayout(self); r=0
+        super().__init__(parent); self.setWindowTitle("Discover – Read Card"); g=QGridLayout(self); r=0
         self.timeout=QSpinBox(minimum=5,maximum=999,value=60)
         g.addWidget(QLabel("Timeout (s)"),r,0); g.addWidget(self.timeout,r,1); r+=1
         self.manual=QCheckBox("Manual entry")
@@ -166,8 +162,7 @@ class DiscoverDlg(QDialog):
         g.addWidget(self.man_reason,r,1); r+=1
         self.manual.toggled.connect(self.man_reason.setEnabled)
         self.tran_type=QComboBox(); self.tran_type.addItems(
-            ["01 Regular","02 Unloading","03 Forced","06 Cashback",
-             "30 Balance","53 Refund","55 Loading"])
+            ["01 Regular","02 Unloading","03 Forced","06 Cashback","30 Balance","53 Refund","55 Loading"])
         g.addWidget(QLabel("Tran. type"),r,0); g.addWidget(self.tran_type,r,1); r+=1
         self.amount=QDoubleSpinBox(decimals=2,maximum=999999,value=10.00)
         g.addWidget(QLabel("Bill ₪"),r,0); g.addWidget(self.amount,r,1)
@@ -185,7 +180,8 @@ class DiscoverDlg(QDialog):
         self.gen_token=QComboBox(); self.gen_token.addItems(["0 None","1 All cards","2 Shufersal"])
         g.addWidget(QLabel("Gen token"),r,0); g.addWidget(self.gen_token,r,1); r+=1
         self.use_tok=QCheckBox("Use token"); self.tok_val=QLineEdit(); self.tok_val.setEnabled(False)
-        g.addWidget(self.use_tok,r,0); g.addWidget(self.tok_val,r,1); r+=1; self.use_tok.toggled.connect(self.tok_val.setEnabled)
+        g.addWidget(self.use_tok,r,0); g.addWidget(self.tok_val,r,1); r+=1
+        self.use_tok.toggled.connect(self.tok_val.setEnabled)
         self.service=QComboBox(); self.service.addItems(["","1","2","3"])
         g.addWidget(QLabel("Service type"),r,0); g.addWidget(self.service,r,1); r+=1
         self.ctls=QCheckBox("CTLS"); self.ctls.setChecked(True)
@@ -218,7 +214,7 @@ class DiscoverDlg(QDialog):
                 'unattended':self.unatt.isChecked(),
                 'operation':self.op.currentText().split()[0]}
 
-# ─────────────────────── main window ───────────────────────
+# ───────────────────── main window ─────────────────────
 class Main(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -232,66 +228,74 @@ class Main(QMainWindow):
         self.qs_defaults:Dict[str,str]={}; self.qs_start_body=''
         self._cancel_timer:Optional[QTimer]=None; self._awaiting_cancel=False
 
-        # UI (layout identical to earlier versions) ───────────────────
+        # UI layout
         central=QWidget(); lay=QVBoxLayout(central)
 
-        # connection row
-        con=QHBoxLayout(); self.ip,self.port=QLineEdit("192.168.1.202"),QLineEdit("5015")
-        for lbl,w in (("IP:",self.ip),("Port:",self.port)): con.addWidget(QLabel(lbl)); con.addWidget(w)
+        # connection + training
+        con=QHBoxLayout()
+        self.ip,self.port=QLineEdit("192.168.1.202"),QLineEdit("5015")
+        self.training_chk=QCheckBox("Training mode")
+        for lbl,w in (("IP:",self.ip),("Port:",self.port)):
+            con.addWidget(QLabel(lbl)); con.addWidget(w)
+        con.addWidget(self.training_chk)
         lay.addLayout(con)
 
-        # register row
+        # register
         rr=QHBoxLayout()
-        self.chain,self.store,self.lane,self.alt = (QLineEdit("39999"),QLineEdit("0123"),QLineEdit("074"),QLineEdit("012345678"))
+        self.chain,self.store,self.lane,self.alt=(QLineEdit("39999"),QLineEdit("0123"),
+                                                  QLineEdit("074"),QLineEdit("012345678"))
         self.pos_type=QComboBox(); self.pos_type.addItems(["ATTENDED","UNATTENDED"])
-        for lbl,w in (("Chain",self.chain),("Store",self.store),("Lane",self.lane),("Alt-ID",self.alt)):
+        for lbl,w in (("Chain",self.chain),("Store",self.store),
+                      ("Lane",self.lane),("Alt-ID",self.alt)):
             rr.addWidget(QLabel(lbl)); rr.addWidget(w)
         rr.addWidget(QLabel("POS Type")); rr.addWidget(self.pos_type)
         self.reg_btn=QPushButton("Register",clicked=self.cmd_register); rr.addWidget(self.reg_btn)
         lay.addLayout(rr)
 
-        # key exchange row
+        # key exchange
         kr=QHBoxLayout(); self.ktk_edit=QLineEdit(); self.ktk_edit.setEnabled(False)
         kr.addWidget(QLabel("KTK (16)")); kr.addWidget(self.ktk_edit)
         self.key_btn=QPushButton("Exchange Keys",clicked=self.cmd_keys); self.key_btn.setEnabled(False)
         kr.addWidget(self.key_btn); lay.addLayout(kr)
 
-        # MAC display row
+        # MAC
         macr=QHBoxLayout(); self.mac_view=QLineEdit(); self.mac_view.setReadOnly(True)
-        macr.addWidget(QLabel("MAC Key")); macr.addWidget(self.mac_view)
-        lay.addLayout(macr)
+        macr.addWidget(QLabel("MAC Key")); macr.addWidget(self.mac_view); lay.addLayout(macr)
 
-        # buttons row
+        # action buttons
         br=QHBoxLayout()
         self.start_btn=QPushButton("Start Tran…",clicked=self.do_start); self.start_btn.setEnabled(False)
         self.disc_btn=QPushButton("Discover…",clicked=self.do_discover); self.disc_btn.setEnabled(False)
         br.addWidget(self.start_btn); br.addWidget(self.disc_btn)
         br.addWidget(QLabel("Amount ₪")); self.qs_amt=QDoubleSpinBox(decimals=2,maximum=999999,value=10.00); br.addWidget(self.qs_amt)
-        self.quick_btn=QPushButton("Quick Sale",clicked=lambda:self.quick_sale(self.qs_amt.value(),'01')); self.quick_btn.setEnabled(False); br.addWidget(self.quick_btn)
-        br.addWidget(QLabel("Admin")); self.cmd_in=QLineEdit(); self.cmd_send=QPushButton("Send",clicked=self.admin_cmd)
+        self.quick_btn=QPushButton("Quick Sale",clicked=lambda:self.quick_sale(self.qs_amt.value(),'01'))
+        self.quick_btn.setEnabled(False); br.addWidget(self.quick_btn)
+        br.addWidget(QLabel("Admin")); self.cmd_in=QLineEdit()
+        self.cmd_send=QPushButton("Send",clicked=self.admin_cmd)
         br.addWidget(self.cmd_in); br.addWidget(self.cmd_send)
         lay.addLayout(br)
 
-        self.status_btn=QPushButton("Status",clicked=self.cmd_status); self.status_btn.setEnabled(False); lay.addWidget(self.status_btn)
+        self.status_btn=QPushButton("Status",clicked=self.cmd_status); self.status_btn.setEnabled(False)
+        lay.addWidget(self.status_btn)
 
-        # log panes
+        # logs
         self.sent,self.recv=QTextEdit(readOnly=True),QTextEdit(readOnly=True)
         split=QSplitter(Qt.Horizontal); split.addWidget(self.sent); split.addWidget(self.recv); lay.addWidget(split)
 
-        # search row
+        # search
         srow=QHBoxLayout(); srow.addWidget(QLabel("Search"))
         self.search_edit=QLineEdit(); self.search_btn=QPushButton("Find",clicked=self.search_logs)
         self.search_edit.returnPressed.connect(self.search_logs)
         srow.addWidget(self.search_edit); srow.addWidget(self.search_btn); lay.addLayout(srow)
-
         lay.addWidget(QPushButton("Clear logs",clicked=lambda:(self.sent.clear(),self.recv.clear())))
+
         self.setCentralWidget(central)
 
         # persistence + webhook
         self._load_mac()
         self.webhook=WebhookServer(parent=self); self.webhook.receivedPayment.connect(self._from_webhook); self.webhook.start()
 
-    # ───────── persistence ─────────
+    # ── persistence ──
     def _load_mac(self):
         if os.path.exists("mac.txt"):
             self.mac_key=open("mac.txt").read().strip()
@@ -300,15 +304,17 @@ class Main(QMainWindow):
                 for b in (self.status_btn,self.start_btn,self.disc_btn,self.quick_btn): b.setEnabled(True)
     def _save_mac(self): open("mac.txt","w",encoding='utf-8').write(self.mac_key)
 
-    # ───────── XML helpers ─────────
+    # ── XML envelope ──
     def _env(self, fg:str, cmd:str, body:str="")->str:
         ts=datetime.now(timezone.utc).strftime("%m.%d.%Y %H:%M:%S UTC")
+        training='1' if self.training_chk.isChecked() else '0'
         hdr=(f"<TRANSACTION><FUNCTION_GROUP>{fg}</FUNCTION_GROUP><COMMAND>{cmd}</COMMAND>"
-             f"<SESSION_ID>{self.session}</SESSION_ID><TRAINING_MODE>0</TRAINING_MODE>"
+             f"<SESSION_ID>{self.session}</SESSION_ID><TRAINING_MODE>{training}</TRAINING_MODE>"
              f"<TRANSACTION_TIME>{ts}</TRANSACTION_TIME>")
         xml=hdr+body+"<MAC></MAC></TRANSACTION>"
         mac=calc_mac(xml,self.mac_key) if self.mac_key else ''
         return hdr+body+f"<MAC>{mac}</MAC></TRANSACTION>"
+
     def _send(self, xml:str):
         try: port=int(self.port.text())
         except ValueError: return QMessageBox.critical(self,"Port","Invalid port")
@@ -316,7 +322,7 @@ class Main(QMainWindow):
         t.result.connect(self._handle); t.finished.connect(lambda:self.threads.remove(t))
         self.threads.append(t); t.start()
 
-    # ───────── body builders ─────────
+    # ── body builders ──
     def _disc_body(self,d:Dict[str,Optional[str]])->str:
         x=(f"<TRANSACTION_DETAILS><RESTRICT_TOKEN>{d['restrict_token']}</RESTRICT_TOKEN>"
            f"<MANUAL>{int(d['manual'])}</MANUAL><CTLS>{int(d['ctls'])}</CTLS>"
@@ -324,66 +330,66 @@ class Main(QMainWindow):
            f"<TRAN_TYPE>{d['tran_type']}</TRAN_TYPE><MTI>100</MTI><ENTRY_MODE>04</ENTRY_MODE>"
            f"<TRANSACTION_AMOUNT>{d['amount']}</TRANSACTION_AMOUNT><ORIGINAL_CURRENCY>{d['currency']}</ORIGINAL_CURRENCY>")
         if d['manual'] and d['manual_reason']: x+=f"<MANUAL_REASON>{d['manual_reason']}</MANUAL_REASON>"
-        if d['cash'] is not None: x+=f"<CASH_AMOUNT>{d['cash']}</CASH_AMOUNT>"
-        if d['fx']: x+=f"<CONVERTED_AMOUNT>{d['fx_amt']}</CONVERTED_AMOUNT><CONVERTED_CURRENCY>{d['fx_to']}</CONVERTED_CURRENCY>"
+        if d['cash'] is not None:             x+=f"<CASH_AMOUNT>{d['cash']}</CASH_AMOUNT>"
+        if d['fx']:                           x+=(f"<CONVERTED_AMOUNT>{d['fx_amt']}</CONVERTED_AMOUNT>"
+                                                  f"<CONVERTED_CURRENCY>{d['fx_to']}</CONVERTED_CURRENCY>")
         if d['use_token'] and d['token_val']: x+=f"<CARD_TOKEN>{d['token_val']}</CARD_TOKEN>"
-        if d['service_type']: x+=f"<SERVICE_TYPE>{d['service_type']}</SERVICE_TYPE>"
+        if d['service_type']:                 x+=f"<SERVICE_TYPE>{d['service_type']}</SERVICE_TYPE>"
         x+=f"<OPERATION>{d['operation']}</OPERATION></TRANSACTION_DETAILS>"
         return f"<TIMEOUT>{d['timeout']}</TIMEOUT>"+x
     def _auth_body(self,base:Dict[str,str],ct:str,pay:int,first:float,nxt:float)->str:
         x=self._disc_body(base)
         inj=f"<CREDIT_TERMS>{ct}</CREDIT_TERMS>"
-        if pay: inj+=f"<PAYMENTS_NUMBER>{pay:02d}</PAYMENTS_NUMBER>"
+        if pay:   inj+=f"<PAYMENTS_NUMBER>{pay:02d}</PAYMENTS_NUMBER>"
         if first: inj+=f"<FIRST_PAYMENT_AMOUNT>{to_minor(first)}</FIRST_PAYMENT_AMOUNT>"
-        if nxt: inj+=f"<NEXT_PAYMENT_AMOUNT>{to_minor(nxt)}</NEXT_PAYMENT_AMOUNT>"
+        if nxt:   inj+=f"<NEXT_PAYMENT_AMOUNT>{to_minor(nxt)}</NEXT_PAYMENT_AMOUNT>"
         return x.replace('</TRANSACTION_DETAILS>',inj+'</TRANSACTION_DETAILS>')
 
-    # ───────── Hebrew receipt writer ─────────
+    # ── receipt writer ──
     def _save_receipt(self, xml:str):
         tag=lambda t:(re.search(fr'<{t}>([^<]*)',xml) or ['',None])[1]
         ts=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         amount=int(tag('TRANSACTION_AMOUNT') or 0)/100
         curr='₪' if tag('ORIGINAL_CURRENCY')=='376' else tag('ORIGINAL_CURRENCY') or ''
         result=tag('POS_TEXT') or tag('RESULT_TEXT') or ''
-        lines=[ "קבלה – Verifone P400",
-                "====================",
-                f"תאריך/שעה    : {ts}",
-                f"סכום         : {amount:.2f} {curr}",
-                f"תוצאה        : {result}",
-                "",
-                "כרטיס",
-                "-----",
-                f"מספר מוסתר   : {tag('MASKED_PAN') or 'N/A'}",
-                f"מותג / מנפיק : {tag('BRAND') or 'N/A'} / {tag('ISSUER') or 'N/A'}",
-                f"תוקף         : {tag('CARD_EXPIRY') or 'N/A'}",
-                "",
-                "עסקה",
-                "-----",
-                f"סוג           : {tag('TRAN_TYPE') or ''}",
-                f"מס׳ אישור     : {tag('ISSUER_AUTH_NUM') or tag('AQUIRER_AUTH_NUM') or 'N/A'}",
-                f"מזהה עסקה    : {tag('TRANS_ID') or 'N/A'}",
-                f"אסמכתא (RRN) : {tag('RRN') or 'N/A'}",
-                "" ]
+        lines=["קבלה – Verifone P400",
+               "====================",
+               f"תאריך/שעה    : {ts}",
+               f"סכום         : {amount:.2f} {curr}",
+               f"תוצאה        : {result}",
+               "",
+               "כרטיס",
+               "-----",
+               f"מספר מוסתר   : {tag('MASKED_PAN') or 'N/A'}",
+               f"מותג / מנפיק : {tag('BRAND') or 'N/A'} / {tag('ISSUER') or 'N/A'}",
+               f"תוקף         : {tag('CARD_EXPIRY') or 'N/A'}",
+               "",
+               "עסקה",
+               "-----",
+               f"סוג           : {tag('TRAN_TYPE') or ''}",
+               f"מס׳ אישור     : {tag('ISSUER_AUTH_NUM') or tag('AQUIRER_AUTH_NUM') or 'N/A'}",
+               f"מזהה עסקה    : {tag('TRANS_ID') or 'N/A'}",
+               f"אסמכתא (RRN) : {tag('RRN') or 'N/A'}",
+               ""]
         if m:=re.search(r'<RECEIPT_ARR>(.*?)</RECEIPT_ARR>',xml,re.S):
             for item in re.findall(r'<RECEIPT_ARR_ITEM>(.*?)</RECEIPT_ARR_ITEM>',m.group(1),re.S):
                 t=re.search(r'<HEBREW_TITLE>([^<]*)',item)
                 v=re.search(r'<VALUE>([^<]*)',item)
                 if t and v: lines.append(f"{t.group(1)} : {v.group(1)}")
-        os.makedirs("receipts", exist_ok=True)
+        os.makedirs("receipts",exist_ok=True)
         fname=datetime.now().strftime("receipts/%y%m%d_%H%M%S_receipt.txt")
         with open(fname,"w",encoding="utf-8") as f: f.write('\n'.join(lines))
         QMessageBox.information(self,"הקבלה נשמרה",f"קובץ הקבלה נוצר:\n{fname}")
 
-    # ───────── auto-cancel helpers ─────────
+    # ── cancel helpers ──
     def _schedule_cancel(self):
         if self._awaiting_cancel: return
         self._awaiting_cancel=True
         self._cancel_timer=QTimer(self); self._cancel_timer.setSingleShot(True)
         self._cancel_timer.timeout.connect(self._send_cancel); self._cancel_timer.start(2000)
-    def _send_cancel(self):
-        self._cancel_timer=None; self._send(self._env("GENERAL","CANCEL"))
+    def _send_cancel(self): self._cancel_timer=None; self._send(self._env("GENERAL","CANCEL"))
 
-    # ───────── buttons/slots ─────────
+    # ── buttons / slots ──
     def cmd_register(self):
         self.session=rand_session()
         body=(f"<CHAIN>{self.chain.text()}</CHAIN><STORE>{self.store.text()}</STORE>"
@@ -408,11 +414,11 @@ class Main(QMainWindow):
             return QMessageBox.warning(self,"Quick Sale","Already running.")
         if not self.session: self.session=rand_session()
         self.qs_amt.setValue(amount)
-        self.qs_defaults={'timeout':'60','restrict_token':'0','manual':False,'manual_reason':'','tran_type':tcode,
-                          'amount':to_minor(amount),'currency':'376','cash':None,'fx':False,'fx_to':'','fx_amt':None,
-                          'use_token':False,'token_val':'','service_type':'','ctls':True,'allow_cancel':True,
-                          'unattended':False,'operation':'04'}
-        self.qs_start_body=f"<INVOICE>100000</INVOICE><POS_TYPE>{self.pos_type.currentText()}</POS_TYPE>"
+        self.qs_defaults={'timeout':'60','restrict_token':'0','manual':False,'manual_reason':'',
+                          'tran_type':tcode,'amount':to_minor(amount),'currency':'376','cash':None,
+                          'fx':False,'fx_to':'','fx_amt':None,'use_token':False,'token_val':'',
+                          'service_type':'','ctls':True,'allow_cancel':True,'unattended':False,'operation':'04'}
+        self.qs_start_body="<INVOICE>100000</INVOICE><POS_TYPE>"+self.pos_type.currentText()+"</POS_TYPE>"
         self.qs_active=True; self._send(self._env("SESSION","START_TRAN",self.qs_start_body))
     @pyqtSlot(float,str)
     def _from_webhook(self, amt:float, tcode:str): self.quick_sale(amt,tcode)
@@ -422,9 +428,9 @@ class Main(QMainWindow):
     def search_logs(self):
         term=self.search_edit.text()
         for pane in (self.sent,self.recv):
-            pane.setExtraSelections([])
+            pane.setExtraSelections([]); sels=[]
             if not term: continue
-            sels,doc=[],pane.document(); cur=QTextCursor(doc)
+            doc=pane.document(); cur=QTextCursor(doc)
             while True:
                 cur=doc.find(term,cur)
                 if cur.isNull(): break
@@ -433,15 +439,15 @@ class Main(QMainWindow):
                 sel.format=fmt; sels.append(sel)
             pane.setExtraSelections(sels)
 
-    # ───────── core FSM ─────────
+    # ── FSM / response handler ──
     def _handle(self, sent:str, recv:str):
         self.sent.append(sent); self.recv.append(recv)
 
-        # global RESULT_CODE 2 trap
+        # auto-cancel on RESULT_CODE 2
         if '<RESULT_CODE>2<' in recv and '<COMMAND>CANCEL' not in sent:
             self._schedule_cancel(); return
 
-        # quick-sale state machine
+        # Quick-Sale state machine
         if self.qs_active:
             if '<COMMAND>START_TRAN' in sent:
                 if '<RESULT_CODE>0<' in recv:
@@ -449,17 +455,16 @@ class Main(QMainWindow):
                 else: self.qs_active=False
                 return
             if '<COMMAND>DISCOVERY' in sent:
-                if '<RESULT_CODE>0<' not in recv: self.qs_active=False; return
+                if '<RESULT_CODE>0<' not in recv:
+                    self.qs_active=False; return
                 f=lambda n:bool(re.search(fr'<TERMS_{n.upper()}>1</TERMS_{n.upper()}>',recv,re.I))
                 flags={k:f(k) for k in ('regular','special','immediate','credit','installments')}
-                credit_ok=flags['credit'] or flags['installments']
-                if credit_ok:
-                    it=lambda tag,d:int(re.search(fr'<{tag}>(\d+)',recv).group(1)) if re.search(fr'<{tag}>\d+',recv) else d
-                    dlg=CreditTermDlg(flags,max(2,it('CREDIT_MIN_PAYMENTS',2)),max(2,it('CREDIT_MAX_PAYMENTS',36)),self.qs_amt.value(),self)
-                    if dlg.exec_()!=QDialog.Accepted:
-                        self.qs_active=False; QMessageBox.information(self,"Quick Sale","בוטל"); return
-                    ct,pay,first,nxt=dlg.data()
-                else: ct,pay,first,nxt='1',0,0.0,0.0
+                it=lambda tag,d:int(re.search(fr'<{tag}>(\d+)',recv).group(1)) if re.search(fr'<{tag}>\d+',recv) else d
+                dlg=CreditTermDlg(flags,max(2,it('CREDIT_MIN_PAYMENTS',2)),max(2,it('CREDIT_MAX_PAYMENTS',36)),
+                                  self.qs_amt.value(),self)
+                if dlg.exec_()!=QDialog.Accepted:
+                    self.qs_active=False; QMessageBox.information(self,"Quick Sale","בוטל"); return
+                ct,pay,first,nxt=dlg.data()
                 self._send(self._env("PAYMENT","AUTHORIZE",self._auth_body(self.qs_defaults,ct,pay,first,nxt))); return
             if '<COMMAND>AUTHORIZE' in sent:
                 if '<RESULT_CODE>0<' in recv:
@@ -478,7 +483,7 @@ class Main(QMainWindow):
             self._awaiting_cancel=False; self.qs_active=False
             self._send(self._env("SESSION","FINISH_TRAN")); return
 
-        # registration / key exchange
+        # register & key exchange
         if '<COMMAND>REGISTER' in sent and '<EVENT>COMPLETED' in recv:
             self.ktk_edit.setEnabled(True); self.key_btn.setEnabled(True)
         if '<COMMAND>EXCHANGE_KEYS' in sent and '<MAC_KEY>' in recv:
@@ -489,13 +494,13 @@ class Main(QMainWindow):
                 except Exception as exc:
                     QMessageBox.critical(self,"Decrypt",str(exc))
 
-    # ───────── cleanup ─────────
+    # ── cleanup ──
     def closeEvent(self,ev):
         self.webhook.terminate()
         for t in self.threads: t.quit(); t.wait()
         ev.accept()
 
-# ─────────────────────── run ───────────────────────
+# ───────────────────── run ─────────────────────
 if __name__=="__main__":
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling,True)
     app=QApplication(sys.argv); Main().show(); sys.exit(app.exec_())
