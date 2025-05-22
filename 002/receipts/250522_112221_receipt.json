@@ -1,0 +1,19 @@
+{
+  "timestamp": "2025-05-22 11:22:21",
+  "amount": 0.0,
+  "currency": "",
+  "result": "הצלחה",
+  "card": {
+    "masked_pan": null,
+    "brand": null,
+    "issuer": null,
+    "expiry": null
+  },
+  "transaction": {
+    "type": null,
+    "issuer_auth_num": null,
+    "trans_id": null,
+    "rrn": null
+  },
+  "extra": []
+}
