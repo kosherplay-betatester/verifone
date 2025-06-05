@@ -1,0 +1,83 @@
+{
+  "timestamp": "2025-06-05 15:17:03",
+  "amount": 0.01,
+  "currency": "",
+  "result": "הצלחה",
+  "card": {
+    "masked_pan": "458007******3565",
+    "brand": "02",
+    "issuer": "02",
+    "expiry": "0728"
+  },
+  "transaction": {
+    "type": "01",
+    "auth_num": "0000000",
+    "trans_id": "X98FMNZ-0002430",
+    "rrn": "000000000000"
+  },
+  "items": [
+    {
+      "terminal_name": "EMV WS Tווריפון"
+    },
+    {
+      "terminal_id": "0883662"
+    },
+    {
+      "app_version": "3_7_6_0000"
+    },
+    {
+      "ACQUIRER_ID": "17324"
+    },
+    {
+      "timestamp_local": "05/06/25 15:16"
+    },
+    {
+      "transaction_type": "עסקת חיוב"
+    },
+    {
+      "amount_text": "0.01"
+    },
+    {
+      "currency_text": "ש\"ח"
+    },
+    {
+      "entry_mode": "Contactless EMV"
+    },
+    {
+      "authorizer": "נדחה ע`י חברה"
+    },
+    {
+      "uid": "25060515164608836628538"
+    },
+    {
+      "voucher_number": "53074002"
+    },
+    {
+      "card_name": "VISA CAL"
+    },
+    {
+      "masked_pan_tail": "3565"
+    },
+    {
+      "credit_terms": "רגיל"
+    },
+    {
+      "chip_app_id": "A0000000031010"
+    },
+    {
+      "atc": "03AC"
+    },
+    {
+      "psn": "01"
+    },
+    {
+      "arc": "05"
+    },
+    {
+      "TVR": "0000001000"
+    },
+    {
+      "ashrait_version": "4.17.0"
+    }
+  ]
+}
