@@ -1,0 +1,19 @@
+{
+  "timestamp": "2025-06-05 13:41:36",
+  "amount": 0.0,
+  "currency": "",
+  "result": "הצלחה",
+  "card": {
+    "masked_pan": "",
+    "brand": "",
+    "issuer": "",
+    "expiry": ""
+  },
+  "transaction": {
+    "type": "",
+    "auth_num": "",
+    "trans_id": "",
+    "rrn": ""
+  },
+  "items": []
+}
