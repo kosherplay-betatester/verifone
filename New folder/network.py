@@ -1,38 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# network.py  –  FULL FILE  (v1.62 • START_TRAN treated as Quick Command)
+# network.py  –  FULL FILE  (v1.63 • 12-digit amount support)
 
 """
-Networking helpers for Verifone-P400 desktop app
-===============================================
+Networking helpers for the Verifone-P400 desktop app
+====================================================
 
-Categories & time-outs
-----------------------
-QUICK_CMDS   = {"PING", "STATUS", **"START_TRAN"**}
-    • Stop reading on <EVENT>COMPLETED>
-    • chunk_timeout = 0.4 s,  max_wait = 4 s
+* QUICK_CMDS   = {"PING", "STATUS", "START_TRAN"}
+    – Stop reading on <EVENT>COMPLETED>
+    – chunk_timeout = 0.4 s,  max_wait = 4 s
 
-USER_CMDS    = {"DISCOVERY", "CARD_DATA", "SIGNATURE_CAPTURE"}
-    • Wait up to 65 s for user action (<EVENT>COMPLETED>)
+* USER_CMDS    = {"DISCOVERY", "CARD_DATA", "SIGNATURE_CAPTURE"}
+    – Wait up to 65 s for user action (<EVENT>COMPLETED>)
 
-RECEIPT_CMDS = {"AUTHORIZE", "FINISH_TRAN", "REFUND"}
-    • Wait for </TRANSACTION>  (full receipt), 15 s max
+* RECEIPT_CMDS = {"AUTHORIZE", "FINISH_TRAN", "REFUND"}
+    – Wait for </TRANSACTION>  (full receipt), 15 s max
 
-Any other command
-    • </TRANSACTION>, 10 s max
+* Any other command
+    – </TRANSACTION>, 10 s max
 """
 
-import re, socket, queue
-from http.server  import HTTPServer, BaseHTTPRequestHandler
-from threading    import Thread, Event
+from __future__ import annotations
+
+import re
+import socket
+import queue
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Thread, Event
 from urllib.parse import urlparse, parse_qs
 
 from PyQt5.QtCore import QThread, pyqtSignal
 from logger import log_traffic
+from utils  import to_minor
 
 
 # ── /pay restrictions ─────────────────────────────────────
-VALID_TYPES = {'01', '02', '03', '06', '30', '53', '55'}
+VALID_TYPES = {"01", "02", "03", "06", "30", "53", "55"}
 
 
 # ══════════════════════════════════════════════════════════
@@ -43,7 +46,7 @@ class SockThread(QThread):
 
     result = pyqtSignal(str, str)           # (sent_xml, received_text)
 
-    QUICK_CMDS   = {"PING", "STATUS", "START_TRAN"}           # ← added START_TRAN
+    QUICK_CMDS   = {"PING", "STATUS", "START_TRAN"}
     USER_CMDS    = {"DISCOVERY", "CARD_DATA", "SIGNATURE_CAPTURE"}
     RECEIPT_CMDS = {"AUTHORIZE", "FINISH_TRAN", "REFUND"}
 
@@ -101,7 +104,13 @@ class SockThread(QThread):
 #                     WebhookServer
 # ══════════════════════════════════════════════════════════
 class WebhookServer(Thread):
-    """Tiny HTTP server exposing /pay and /receipt endpoints."""
+    """
+    Tiny HTTP server exposing /pay and /receipt endpoints.
+
+    New feature (v1.63):
+        • /pay?amount=000000012345      – 12-digit minor units
+        • /pay?amount=123.45            – regular decimal
+    """
 
     def __init__(self, host: str, port: int, callback):
         super().__init__(daemon=True)
@@ -110,31 +119,37 @@ class WebhookServer(Thread):
         self._signal = Event()
         self._last   = b"{}"
 
+    # ---------- publish receipt ----------
     def publish(self, data: bytes):
         data = data or b"{}"
-        self._q.put(data); self._last = data; self._signal.set()
+        self._q.put(data)
+        self._last = data
+        self._signal.set()
 
     # ---------- HTTP handler ----------
     def run(self):
         outer = self
 
         class H(BaseHTTPRequestHandler):
-            # helpers
-            def _plain(self, st, body):
+            # helpers ----------------------------------------------------
+            def _plain(self, st, body=b""):
                 self.send_response(st)
                 self.send_header("Content-Type", "text/plain")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers(); self.wfile.write(body)
+                self.end_headers()
+                if body:
+                    self.wfile.write(body)
 
-            def _json(self, st, body):
+            def _json(self, st, body=b"{}"):
                 self.send_response(st)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers(); self.wfile.write(body)
+                self.end_headers()
+                self.wfile.write(body)
 
-            # CORS
+            # CORS pre-flight -------------------------------------------
             def do_OPTIONS(self):
                 self.send_response(204)
                 self.send_header("Access-Control-Allow-Origin", "*")
@@ -143,29 +158,39 @@ class WebhookServer(Thread):
                 self.send_header("Access-Control-Max-Age", "86400")
                 self.end_headers()
 
-            # main GET
+            # main GET ---------------------------------------------------
             def do_GET(self):
                 try:
                     p = urlparse(self.path)
 
-                    # /receipt
+                    # /receipt.json
                     if p.path in ("/receipt", "/receipt.json"):
                         return self._json(200, outer._last)
 
-                    # /pay
+                    # /pay ------------------------------------------------
                     if p.path != "/pay":
                         return self._plain(404, b"Not Found")
-                    q = parse_qs(p.query)
 
-                    try:    amt = float(q["amount"][0]); assert amt > 0
-                    except Exception:
-                        return self._plain(400, b"amount must be positive")
+                    q = parse_qs(p.query)
+                    raw_amt = q.get("amount", [""])[0]
+
+                    # ----- amount parsing (12-digit *or* decimal) -------
+                    if re.fullmatch(r"\d{12}", raw_amt):           # 000000012345
+                        amt = int(raw_amt) / 100
+                    else:
+                        try:
+                            amt = float(raw_amt)
+                            assert amt > 0
+                        except Exception:
+                            return self._plain(400, b"amount must be positive")
 
                     code = q.get("type", ["01"])[0]
                     if code not in VALID_TYPES:
                         return self._plain(400, b"invalid type")
 
                     wait = q.get("wait", ["0"])[0] == "1"
+
+                    # Hand off to GUI layer
                     outer.callback(amt, code)
 
                     if not wait:
@@ -174,17 +199,22 @@ class WebhookServer(Thread):
                     if not outer._signal.wait(timeout=65):
                         return self._plain(504, b"timeout")
 
-                    try:    body = outer._q.get_nowait()
+                    try:
+                        body = outer._q.get_nowait()
                     except queue.Empty:
                         return self._plain(504, b"timeout")
 
-                    if outer._q.empty(): outer._signal.clear()
+                    if outer._q.empty():
+                        outer._signal.clear()
+
                     return self._json(200, body)
 
                 except (ConnectionAbortedError, BrokenPipeError):
-                    return
+                    return  # client disconnected; ignore
 
             # suppress default logging
-            def log_message(self, *args): pass
+            def log_message(self, *args):  # noqa: D401
+                pass
 
+        # Run HTTP server forever
         HTTPServer((self.host, self.port), H).serve_forever()
