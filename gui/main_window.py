@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# gui/main_window.py  –  FULL FILE  (v1.63 • SHVA_TERM_ID validation + Save-Settings)
+# gui/main_window.py  –  FULL FILE  (v1.65 • Recovery-hang fix)
 
 """
 Main admin window for Verifone-P400 desktop app
@@ -13,15 +13,19 @@ Key features
 * Manual REGISTER / EXCHANGE_KEYS / STATUS / EOD / generic ADMIN commands
 * Auto-EOD once every 24 h at a user-selected HH:mm
 * Free-Call XML sandbox with auto-signing
-* Auto-cancel on RESULT_CODE 2 **and** on user “ביטול” in Credit dialog
+* Auto-cancel on RESULT_CODE 2 **and** על ביטול ידני בדיאלוג אשראי
 * Receipt for any AUTHORIZE reply is always written to *receipt.json*
 * Logs of every request/response pair with 14-day auto-rotation
-* v1.63 additions:
-    • “SHVA ID” field, persisted in *settings.txt* (key: **shva_term_id**)
-    • “Save Settings” button
-    • During Quick-Sale STATUS the device’s <SHVA_TERM_ID> must match
-      the saved ID – otherwise the sale is cancelled and an error shown:
-        מזהה SHVA אינו תקין, אנא פנה לטכנאי
+
+v1.64 (previous): Μechanism to recover if AUTHORIZE returns without
+                  EVENT=COMPLETED (GET_TRAN_DETAILS → VOID)
+
+v1.65 (this file): Three small fixes that prevented the recovery from
+                  triggering when the device got “stuck” after DISCOVERY:
+    1. Flag `_qs_phase = "AUTHORIZE"` **before** sending AUTHORIZE.
+    2. Remove a redundant phase-check so any AUTHORIZE reply is inspected.
+    3. Socket time-out already arrives as partial XML; the change in (2)
+       makes it trigger the recovery path automatically.
 """
 
 from __future__ import annotations
@@ -39,8 +43,9 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox, QDialog, QTimeEdit
 )
 
+# Project-local imports
 from config   import load_settings, load_mac, save_mac, save_settings
-from dialogs  import CreditTermDlg, DiscoverDlg   # DiscoverDlg still available for manual ops
+from dialogs  import CreditTermDlg, DiscoverDlg
 from logger   import log_traffic
 from network  import SockThread, WebhookServer
 from receipt  import save_receipt
@@ -49,7 +54,7 @@ from xml_sign import env_xml, sign_xml, template_xml
 
 
 # ══════════════════════════════════════════════════════════
-#                     MainWindow
+#                       MainWindow
 # ══════════════════════════════════════════════════════════
 class MainWindow(QMainWindow):
     """Admin GUI + business logic for the desktop application."""
@@ -62,7 +67,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Verifone P400 – Quick Sale / Webhook / Admin")
         self.resize(1120, 860)
 
-        # ----- runtime state -----
+        # ---------- runtime state ----------
         self.session                 = ""
         self.mac_key                 = load_mac()
         self.threads: list[SockThread] = []
@@ -74,14 +79,16 @@ class MainWindow(QMainWindow):
         self._awaiting_cancel        = False
         self._cancel_timer           = None
         self._manual_key_exchange    = False
-        self._qs_phase               = ""
+        self._qs_phase               = ""      # PING / STATUS / … / AUTHORIZE / VOID / …
+        self._trans_id               = ""      # saved from DISCOVERY for recovery
 
         cfg = load_settings()
 
         # ═════════════════════════ UI BUILD ═════════════════════════
-        central = QWidget(); root = QVBoxLayout(central)
+        central = QWidget()
+        root    = QVBoxLayout(central)
 
-        # ─ Connection row ─
+        # ───── Connection row ─────
         row = QHBoxLayout()
         self.ip_field    = QLineEdit(cfg["ip"])
         self.port_field  = QLineEdit(cfg["port"])
@@ -92,50 +99,49 @@ class MainWindow(QMainWindow):
             row.addWidget(QLabel(lbl)); row.addWidget(w)
         root.addLayout(row)
 
-        # ─ Register row ─
+        # ───── Register row ─────
         row = QHBoxLayout()
-        self.chain_field = QLineEdit(cfg["chain"])
-        self.store_field = QLineEdit(cfg["store"])
-        self.lane_field  = QLineEdit(cfg["lane"])
-        self.alt_field   = QLineEdit(cfg["alt"])
-        self.termid_field = QLineEdit(cfg.get("shva_term_id", ""))    # NEW
-        self.pos_combo = QComboBox(); self.pos_combo.addItems(["ATTENDED", "UNATTENDED"])
+        self.chain_field  = QLineEdit(cfg["chain"])
+        self.store_field  = QLineEdit(cfg["store"])
+        self.lane_field   = QLineEdit(cfg["lane"])
+        self.alt_field    = QLineEdit(cfg["alt"])
+        self.termid_field = QLineEdit(cfg.get("shva_term_id", ""))
+        self.pos_combo    = QComboBox(); self.pos_combo.addItems(["ATTENDED", "UNATTENDED"])
         self.pos_combo.setCurrentText(cfg.get("pos_type", "ATTENDED"))
-
-        for lbl, w in [
-            ("Chain", self.chain_field), ("Store", self.store_field),
-            ("Lane",  self.lane_field),  ("Alt-ID", self.alt_field),
-            ("SHVA ID", self.termid_field)
-        ]:
+        for lbl, w in [("Chain", self.chain_field), ("Store", self.store_field),
+                       ("Lane",  self.lane_field) , ("Alt-ID", self.alt_field),
+                       ("SHVA ID", self.termid_field)]:
             row.addWidget(QLabel(lbl)); row.addWidget(w)
         row.addWidget(QLabel("POS Type")); row.addWidget(self.pos_combo)
         self.reg_btn = QPushButton("Register"); self.reg_btn.clicked.connect(self.cmd_register)
         row.addWidget(self.reg_btn)
         root.addLayout(row)
 
-        # ─ Save-Settings row ─
+        # ───── Save-Settings row ─────
         row = QHBoxLayout(); row.addStretch(1)
         self.save_btn = QPushButton("Save Settings"); self.save_btn.clicked.connect(self._save_settings)
-        row.addWidget(self.save_btn); root.addLayout(row)
+        row.addWidget(self.save_btn)
+        root.addLayout(row)
 
-        # ─ Key-exchange row ─
+        # ───── Key-exchange row ─────
         row = QHBoxLayout()
         self.ktk_field = QLineEdit(cfg.get("ktk", "")); self.ktk_field.setEnabled(False)
-        self.key_btn = QPushButton("Exchange Keys"); self.key_btn.setEnabled(False)
+        self.key_btn   = QPushButton("Exchange Keys"); self.key_btn.setEnabled(False)
         self.key_btn.clicked.connect(self.cmd_keys)
         row.addWidget(QLabel("KTK (16)")); row.addWidget(self.ktk_field); row.addWidget(self.key_btn)
         root.addLayout(row)
 
-        # ─ MAC view ─
+        # ───── MAC view row ─────
         row = QHBoxLayout()
         self.mac_view = QLineEdit(self.mac_key); self.mac_view.setReadOnly(True)
         row.addWidget(QLabel("MAC Key")); row.addWidget(self.mac_view)
         root.addLayout(row)
 
-        # ─ Quick-Sale row ─
+        # ───── Quick-Sale row ─────
         row = QHBoxLayout()
         row.addWidget(QLabel("Amount ₪"))
-        self.qs_amount = QDoubleSpinBox(decimals=2, maximum=999999, value=cfg.get("quick_amount", 0.0))
+        self.qs_amount = QDoubleSpinBox(decimals=2, maximum=999999,
+                                        value=cfg.get("quick_amount", 0.0))
         row.addWidget(self.qs_amount)
         self.qs_btn = QPushButton("Quick Sale")
         self.qs_btn.setEnabled(bool(self.mac_key))
@@ -147,7 +153,7 @@ class MainWindow(QMainWindow):
         row.addWidget(self.admin_edit); row.addWidget(self.admin_send)
         root.addLayout(row)
 
-        # ─ Status / EOD buttons ─
+        # ───── Status / EOD buttons ─────
         row = QHBoxLayout()
         self.status_btn = QPushButton("Status"); self.status_btn.setEnabled(bool(self.mac_key))
         self.status_btn.clicked.connect(self.cmd_status); row.addWidget(self.status_btn)
@@ -155,7 +161,7 @@ class MainWindow(QMainWindow):
         self.eod_btn.clicked.connect(self.cmd_eod); row.addWidget(self.eod_btn)
         root.addLayout(row)
 
-        # ─ Auto-EOD scheduler ─
+        # ───── Auto-EOD scheduler ─────
         row = QHBoxLayout()
         row.addWidget(QLabel("Auto EOD at"))
         self.eod_time_edit = QTimeEdit(); self.eod_time_edit.setDisplayFormat("HH:mm")
@@ -167,22 +173,26 @@ class MainWindow(QMainWindow):
         self.eod_time_edit.timeChanged.connect(self._schedule_auto_eod)
         self._schedule_auto_eod(self.eod_time_edit.time())
 
-        # ─ Logs splitter ─
-        self.sent_log = QTextEdit(readOnly=True); self.recv_log = QTextEdit(readOnly=True)
-        spl = QSplitter(Qt.Horizontal); spl.addWidget(self.sent_log); spl.addWidget(self.recv_log)
+        # ───── Logs splitter ─────
+        self.sent_log = QTextEdit(readOnly=True)
+        self.recv_log = QTextEdit(readOnly=True)
+        spl = QSplitter(Qt.Horizontal)
+        spl.addWidget(self.sent_log)
+        spl.addWidget(self.recv_log)
         root.addWidget(spl, stretch=1)
 
-        # ─ Search row ─
+        # ───── Search row ─────
         row = QHBoxLayout(); row.addWidget(QLabel("Search"))
         self.search_edit = QLineEdit()
         self.search_btn  = QPushButton("Find"); self.search_btn.clicked.connect(self.search_logs)
         self.search_edit.returnPressed.connect(self.search_logs)
         row.addWidget(self.search_edit); row.addWidget(self.search_btn)
         root.addLayout(row)
-        clr = QPushButton("Clear logs"); clr.clicked.connect(lambda: (self.sent_log.clear(), self.recv_log.clear()))
+        clr = QPushButton("Clear logs")
+        clr.clicked.connect(lambda: (self.sent_log.clear(), self.recv_log.clear()))
         root.addWidget(clr)
 
-        # ─ Free-Call sandbox ─
+        # ───── Free-Call sandbox ─────
         fc = QVBoxLayout(); fc.addWidget(QLabel("<b>Free-Call XML Sandbox</b>"))
         self.free_xml_edit = QTextEdit(); fc.addWidget(self.free_xml_edit, stretch=1)
         bar = QHBoxLayout()
@@ -200,18 +210,22 @@ class MainWindow(QMainWindow):
             b = QPushButton(lbl); b.setEnabled(bool(self.mac_key))
             b.clicked.connect(lambda _, g=fg, c=cmd: self.fill_template(g, c))
             bar.addWidget(b); self.free_cmds.append(b)
-        fc.addLayout(bar); root.addLayout(fc, stretch=2)
+        fc.addLayout(bar)
+        root.addLayout(fc, stretch=2)
 
         self.setCentralWidget(central)
 
-        # ─ Webhook server ─
+        # ───── Webhook server ─────
         host = cfg.get("webhook_host", "localhost") or "localhost"
-        try: port = int(cfg.get("webhook_port", 8080))
-        except (ValueError, TypeError): port = 8080
-        self.webhook = WebhookServer(host, port, self._from_webhook); self.webhook.start()
+        try:
+            port = int(cfg.get("webhook_port", 8080))
+        except (ValueError, TypeError):
+            port = 8080
+        self.webhook = WebhookServer(host, port, self._from_webhook)
+        self.webhook.start()
 
     # ══════════════════════════════════════════════════════
-    # Save-Settings helper
+    # Save settings
     # ══════════════════════════════════════════════════════
     def _save_settings(self):
         try:
@@ -228,11 +242,11 @@ class MainWindow(QMainWindow):
                 "quick_amount": self.qs_amount.value(),
                 "webhook_host": "localhost",
                 "webhook_port": 8080,
-                "shva_term_id": self.termid_field.text().strip()
+                "shva_term_id": self.termid_field.text().strip(),
             }
             save_settings(data)
             self._info("Settings", "Saved successfully.")
-        except Exception as exc:                                         # pragma: no cover
+        except Exception as exc:
             self._crit("Settings", f"Save failed: {exc}")
 
     # ══════════════════════════════════════════════════════
@@ -296,17 +310,18 @@ class MainWindow(QMainWindow):
     # Auto-EOD scheduling
     # ══════════════════════════════════════════════════════
     def _schedule_auto_eod(self, tm: QTime):
-        now = QDateTime.currentDateTime()
-        target = QDateTime(now.date(), tm)
-        if target <= now: target = target.addDays(1)
+        now     = QDateTime.currentDateTime()
+        target  = QDateTime(now.date(), tm)
+        if target <= now:
+            target = target.addDays(1)
         self._eod_timer.start(now.msecsTo(target))
 
     def _handle_auto_eod(self):
         self.cmd_eod()
-        self._eod_timer.start(24 * 60 * 60 * 1000)   # same hour next day
+        self._eod_timer.start(24 * 60 * 60 * 1000)  # same hour next day
 
     # ══════════════════════════════════════════════════════
-    # Quick-Sale helpers (queue)
+    # Quick-Sale helpers
     # ══════════════════════════════════════════════════════
     def quick_sale(self, amount: float, tran_type: str = "01"):
         self.qs_queue.append((amount, tran_type))
@@ -352,6 +367,11 @@ class MainWindow(QMainWindow):
                       self.qs_start_body)
         self._send(xml)
 
+    def _send_finish_tran(self):
+        xml = env_xml("SESSION", "FINISH_TRAN", self.session,
+                      bool(int(self.train_combo.currentText())), self.mac_key)
+        self._send(xml)
+
     def _qs_done(self):
         self.qs_active = False
         self._qs_phase = ""
@@ -363,7 +383,7 @@ class MainWindow(QMainWindow):
         self.quick_sale(amount, tcode)
 
     # ══════════════════════════════════════════════════════
-    # DISCOVERY / AUTHORIZE body builders
+    # Helpers to build body XML
     # ══════════════════════════════════════════════════════
     def _disc_body(self, o: dict) -> str:
         parts = [
@@ -398,22 +418,56 @@ class MainWindow(QMainWindow):
     def _auth_body(self, base: dict, ct: str, pay: int, first: float, nxt: float) -> str:
         body = self._disc_body(base)
         inj = f"<CREDIT_TERMS>{ct}</CREDIT_TERMS>"
-        if pay:   inj += f"<PAYMENTS_NUMBER>{pay:02d}</PAYMENTS_NUMBER>"
-        if first: inj += f"<FIRST_PAYMENT_AMOUNT>{to_minor(first)}</FIRST_PAYMENT_AMOUNT>"
-        if nxt:   inj += f"<NEXT_PAYMENT_AMOUNT>{to_minor(nxt)}</NEXT_PAYMENT_AMOUNT>"
+        if pay:
+            inj += f"<PAYMENTS_NUMBER>{pay:02d}</PAYMENTS_NUMBER>"
+        if first:
+            inj += f"<FIRST_PAYMENT_AMOUNT>{to_minor(first)}</FIRST_PAYMENT_AMOUNT>"
+        if nxt:
+            inj += f"<NEXT_PAYMENT_AMOUNT>{to_minor(nxt)}</NEXT_PAYMENT_AMOUNT>"
         return body.replace("</TRANSACTION_DETAILS>", inj + "</TRANSACTION_DETAILS>")
+
+    # ══════════════════════════════════════════════════════
+    # Recovery helpers
+    # ══════════════════════════════════════════════════════
+    def _send_get_details(self):
+        if not self._trans_id:
+            self._warn("Recovery", "TRANS_ID missing – cannot query details; queue aborted")
+            self._qs_done()
+            return
+        body = f"<TRANS_ID>{self._trans_id}</TRANS_ID>"
+        xml  = env_xml("REPORT", "GET_TRAN_DETAILS", self.session,
+                       bool(int(self.train_combo.currentText())), self.mac_key, body)
+        self._qs_phase = "GET_DETAILS"
+        self._send(xml)
+
+    def _send_void(self):
+        body = (
+            "<TRANSACTION_DETAILS>"
+            "<OPERATION>04</OPERATION><TRAN_TYPE>01</TRAN_TYPE>"
+            "<MTI>400</MTI>"
+            f"<TRANS_ID>{self._trans_id}</TRANS_ID>"
+            "<TRANSACTION_AMOUNT>000000000000</TRANSACTION_AMOUNT>"
+            "<ORIGINAL_CURRENCY>376</ORIGINAL_CURRENCY>"
+            "</TRANSACTION_DETAILS>"
+        )
+        xml = env_xml("PAYMENT", "AUTHORIZE", self.session,
+                      bool(int(self.train_combo.currentText())), self.mac_key, body)
+        self._qs_phase = "VOID"
+        self._send(xml)
 
     # ══════════════════════════════════════════════════════
     # TCP send helper
     # ══════════════════════════════════════════════════════
     def _send(self, xml: str):
-        try: port = int(self.port_field.text())
+        try:
+            port = int(self.port_field.text())
         except ValueError:
             return self._crit("Port", "Invalid port number")
         thr = SockThread(self.ip_field.text().strip(), port, xml)
         thr.result.connect(self._handle_response)
         thr.finished.connect(lambda: self.threads.remove(thr))
-        self.threads.append(thr); thr.start()
+        self.threads.append(thr)
+        thr.start()
 
     # ══════════════════════════════════════════════════════
     # Free-Call helpers
@@ -425,7 +479,8 @@ class MainWindow(QMainWindow):
 
     def free_send(self):
         raw = self.free_xml_edit.toPlainText().strip()
-        if not raw: return self._info("Free-Call", "XML area is empty.")
+        if not raw:
+            return self._info("Free-Call", "XML area is empty.")
         try:
             signed = raw if re.search(r"<MAC>.*?</MAC>", raw, re.S) else sign_xml(raw, self.mac_key)
         except Exception as exc:
@@ -440,21 +495,28 @@ class MainWindow(QMainWindow):
         term = self.search_edit.text()
         for pane in (self.sent_log, self.recv_log):
             pane.setExtraSelections([])
-            if not term: continue
-            doc = pane.document(); cur = QTextCursor(doc); sels = []
+            if not term:
+                continue
+            doc = pane.document()
+            cur = QTextCursor(doc)
+            sels = []
             while True:
                 cur = doc.find(term, cur)
-                if cur.isNull(): break
-                sel = QTextEdit.ExtraSelection(); sel.cursor = cur
+                if cur.isNull():
+                    break
+                sel = QTextEdit.ExtraSelection()
+                sel.cursor = cur
                 fmt = QTextCharFormat(); fmt.setBackground(QColor("#ffff66"))
-                sel.format = fmt; sels.append(sel)
+                sel.format = fmt
+                sels.append(sel)
             pane.setExtraSelections(sels)
 
     # ══════════════════════════════════════════════════════
     # Auto-cancel helpers
     # ══════════════════════════════════════════════════════
     def _schedule_cancel(self):
-        if self._awaiting_cancel: return
+        if self._awaiting_cancel:
+            return
         self._awaiting_cancel = True
         self._cancel_timer = QTimer(self); self._cancel_timer.setSingleShot(True)
         self._cancel_timer.timeout.connect(self._send_cancel)
@@ -467,36 +529,70 @@ class MainWindow(QMainWindow):
         self._send(xml)
 
     # ══════════════════════════════════════════════════════
+    # DISCOVERY → AUTHORIZE helper
+    # ══════════════════════════════════════════════════════
+    def _handle_discovery_ok(self, recv: str):
+        """Called when DISCOVERY completed successfully."""
+        # 1. Save TRANS_ID for recovery
+        m_tid = re.search(r"<TRANS_ID>([^<]+)</TRANS_ID>", recv)
+        self._trans_id = m_tid.group(1) if m_tid else ""
+
+        # 2. Build Credit-dialog
+        flags = {k: bool(re.search(fr"<TERMS_{k.upper()}>1</TERMS_{k.upper()}>", recv))
+                 for k in ("regular", "special", "immediate", "credit", "installments")}
+        def _i(tag, d): m = re.search(fr"<{tag}>(\d+)", recv); return int(m.group(1)) if m else d
+        mn = max(2, _i("CREDIT_MIN_PAYMENTS", 2))
+        mx = max(2, _i("CREDIT_MAX_PAYMENTS", 36))
+        dlg = CreditTermDlg(flags, mn, mx, self._current_amount, None)
+        if dlg.exec_() != QDialog.Accepted:
+            self._send_cancel()
+            return
+        ct, pay, first, nxt = dlg.data()
+
+        # 3. Send AUTHORIZE
+        body = self._auth_body(self.qs_defaults, ct, pay, first, nxt)
+        xml  = env_xml("PAYMENT", "AUTHORIZE", self.session,
+                       bool(int(self.train_combo.currentText())), self.mac_key, body)
+        # **FIX #1 – phase BEFORE send**
+        self._qs_phase = "AUTHORIZE"
+        self._send(xml)
+
+    # ══════════════════════════════════════════════════════
     # Central response handler
     # ══════════════════════════════════════════════════════
     def _handle_response(self, sent: str, recv: str):
-        self.sent_log.append(sent); self.recv_log.append(recv)
+        self.sent_log.append(sent)
+        self.recv_log.append(recv)
 
         # auto-cancel on RESULT_CODE 2
         if "<RESULT_CODE>2<" in recv and "<COMMAND>CANCEL" not in sent:
-            self._schedule_cancel(); return
+            self._schedule_cancel()
+            return
 
-        # ═════════════════════ Quick-Sale FSM ════════════════
+        # ───────── Quick-Sale FSM ─────────
         if self.qs_active:
 
             # PING → STATUS
             if "<COMMAND>PING" in sent:
-                if "<RESULT_CODE>0<" in recv: self._send_status()
-                else: self._qs_done()
+                if "<RESULT_CODE>0<" in recv:
+                    self._send_status()
+                else:
+                    self._qs_done()
                 return
 
             # STATUS validation
             if "<COMMAND>STATUS" in sent:
                 if "<RESULT_CODE>0<" in recv:
-                    # --- SHVA_TERM_ID check ---
+                    # SHVA ID check
                     expected = self.termid_field.text().strip()
                     m_tid = re.search(r"<SHVA_TERM_ID>(\d+)</SHVA_TERM_ID>", recv)
                     if expected and m_tid and m_tid.group(1) != expected:
-                        self._crit("SHVA ID", "מזהה SHVA אינו תקין, אנא פנה לטכנאי")
+                        self._crit("SHVA ID", "מזהה SHVA אינו תקין – פונה לטכנאי")
                         self._send_cancel(); self._qs_done(); return
-                    # SHVA_STATUS auto-EOD
+                    # auto-EOD if SHVA_STATUS != 1
                     m_stat = re.search(r"<SHVA_STATUS>(\d+)", recv)
-                    if m_stat and m_stat.group(1) != "1": self.cmd_eod()
+                    if m_stat and m_stat.group(1) != "1":
+                        self.cmd_eod()
                     self._send_start_tran()
                 else:
                     self._qs_done()
@@ -508,58 +604,77 @@ class MainWindow(QMainWindow):
                     body = self._disc_body(self.qs_defaults)
                     xml  = env_xml("PAYMENT", "DISCOVERY", self.session,
                                    bool(int(self.train_combo.currentText())), self.mac_key, body)
+                    self._qs_phase = "DISCOVERY"
                     self._send(xml)
                 else:
                     self._qs_done()
                 return
 
-            # DISCOVERY → CreditTermDlg → AUTHORIZE
+            # DISCOVERY replies
             if "<COMMAND>DISCOVERY" in sent:
-                if "<RESULT_CODE>0<" not in recv:
-                    self._qs_done(); return
-                flags = {k: bool(re.search(fr"<TERMS_{k.upper()}>1</TERMS_{k.upper()}>", recv))
-                         for k in ("regular", "special", "immediate", "credit", "installments")}
-                def _i(tag, d): m = re.search(fr"<{tag}>(\d+)", recv); return int(m.group(1)) if m else d
-                mn = max(2, _i("CREDIT_MIN_PAYMENTS", 2)); mx = max(2, _i("CREDIT_MAX_PAYMENTS", 36))
-                dlg = CreditTermDlg(flags, mn, mx, self._current_amount, None)
-                if dlg.exec_() != QDialog.Accepted:
-                    self._send_cancel(); return
-                ct, pay, first, nxt = dlg.data()
-                body = self._auth_body(self.qs_defaults, ct, pay, first, nxt)
-                xml  = env_xml("PAYMENT", "AUTHORIZE", self.session,
-                               bool(int(self.train_combo.currentText())), self.mac_key, body)
-                self._send(xml); return
+                if "<RESULT_CODE>0<" in recv:
+                    self._handle_discovery_ok(recv)
+                else:
+                    self._qs_done()
+                return
 
-            # AUTHORIZE → save_receipt → FINISH_TRAN
+            # ---------- AUTHORIZE replies ----------
             if "<COMMAND>AUTHORIZE" in sent:
-                save_receipt(recv)
-                try:
-                    with open("receipt.json", "rb") as fp:
-                        self.webhook.publish(fp.read())
-                except Exception:
-                    pass
-                xml = env_xml("SESSION", "FINISH_TRAN", self.session,
-                              bool(int(self.train_combo.currentText())), self.mac_key)
-                self._send(xml); return
+                # **FIX #2 – no phase check**
+                if "<EVENT>COMPLETED" in recv:
+                    # normal flow
+                    save_receipt(recv)
+                    try:
+                        with open("receipt.json", "rb") as fp:
+                            self.webhook.publish(fp.read())
+                    except Exception:
+                        pass
+                    self._send_finish_tran()
+                    return
 
-            # FINISH_TRAN → queue done
+                # Not completed – recovery path
+                self._info("Recovery",
+                           "AUTHORIZE missing EVENT=COMPLETED – issuing GET_TRAN_DETAILS")
+                self._send_get_details()
+                return
+            # ---------------------------------------
+
+            # GET_TRAN_DETAILS replies
+            if "<COMMAND>GET_TRAN_DETAILS" in sent:
+                approved = "<RESULT_CODE>0<" in recv and "<TRANSACTIONS>" in recv \
+                           and not "<TRANSACTIONS></TRANSACTIONS>" in recv
+                if approved:
+                    self._info("Recovery", "עסקה קיימת ואושרה – שולח VOID")
+                    self._send_void()
+                else:
+                    self._crit("Recovery", "No matching transaction – aborting queue")
+                    self._qs_done()
+                return
+
+            # VOID replies
+            if self._qs_phase == "VOID" and "<COMMAND>AUTHORIZE" in sent:
+                self._send_finish_tran()
+                return
+
+            # FINISH_TRAN replies
             if "<COMMAND>FINISH_TRAN" in sent:
-                self._qs_done(); return
+                self._qs_done()
+                return
 
-        # Cancel reply outside QS
+        # ───────── Cancel reply outside QS ─────────
         if "<COMMAND>CANCEL" in sent:
-            m = re.search(r"<RESULT_CODE>(\d+)<", recv); code = m.group(1) if m else None
+            m = re.search(r"<RESULT_CODE>(\d+)<", recv)
+            code = m.group(1) if m else None
             if code not in ("0", "50", "51"):
                 self._warn("Cancel failed", f"code {code or '?'}")
-            xml = env_xml("SESSION", "FINISH_TRAN", self.session,
-                          bool(int(self.train_combo.currentText())), self.mac_key)
-            self._send(xml); return
+            self._send_finish_tran()
+            return
 
-        # REGISTER completed → enable Exchange-Keys
+        # ───────── Register / Keys housekeeping ─────────
         if "<COMMAND>REGISTER" in sent and "<EVENT>COMPLETED" in recv:
-            self.ktk_field.setEnabled(True); self.key_btn.setEnabled(True)
+            self.ktk_field.setEnabled(True)
+            self.key_btn.setEnabled(True)
 
-        # EXCHANGE_KEYS (manual) → decrypt MAC
         if "<COMMAND>EXCHANGE_KEYS" in sent and "<MAC_KEY>" in recv and self._manual_key_exchange:
             m = re.search(r"<MAC_KEY>([^<]+)</MAC_KEY>", recv)
             if m:
@@ -578,7 +693,7 @@ class MainWindow(QMainWindow):
                     self._manual_key_exchange = False
 
     # =================================================================
-    # End class
+    # End class MainWindow
     # =================================================================
 
 
@@ -587,5 +702,7 @@ class MainWindow(QMainWindow):
 # ══════════════════════════════════════════════════════════
 if __name__ == "__main__":
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    app = QApplication(sys.argv); win = MainWindow(); win.show()
+    app = QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
     sys.exit(app.exec_())

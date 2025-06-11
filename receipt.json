@@ -1,6 +1,6 @@
 {
-  "timestamp": "2025-06-10 12:26:35",
-  "amount": 111.11,
+  "timestamp": "2025-06-11 13:30:01",
+  "amount": 116.11,
   "currency": "",
   "result": "הצלחה",
   "card": {
@@ -11,9 +11,9 @@
   },
   "transaction": {
     "type": "53",
-    "auth_num": "2008514",
-    "trans_id": "X98FMNZ-0002955",
-    "rrn": "516112008514"
+    "auth_num": "2013170",
+    "trans_id": "X98FMNZ-0002959",
+    "rrn": "516213013170"
   },
   "items": [
     {
@@ -29,13 +29,13 @@
       "ACQUIRER_ID": "71506"
     },
     {
-      "timestamp_local": "10/06/25 12:26"
+      "timestamp_local": "11/06/25 13:29"
     },
     {
       "transaction_type": "עסקת זיכוי"
     },
     {
-      "amount_text": "111.11"
+      "amount_text": "116.11"
     },
     {
       "currency_text": "ש\"ח"
@@ -44,19 +44,19 @@
       "entry_mode": "Contactless EMV"
     },
     {
-      "ISSUER_AUTH_NUMBER": "2008514"
+      "ISSUER_AUTH_NUMBER": "2013170"
     },
     {
       "authorizer": "חברה"
     },
     {
-      "uid": "25061012261808836624086"
+      "uid": "25061113294308836622741"
     },
     {
-      "RRN": "516112008514"
+      "RRN": "516213013170"
     },
     {
-      "voucher_number": "65074004"
+      "voucher_number": "66074003"
     },
     {
       "card_name": "Mastercard"
@@ -71,7 +71,7 @@
       "chip_app_id": "A0000000041010"
     },
     {
-      "atc": "012C"
+      "atc": "012F"
     },
     {
       "TSI": "6800"
