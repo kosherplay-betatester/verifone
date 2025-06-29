@@ -3,15 +3,13 @@
 """
 Transparent always-on-top overlay for short Hebrew status messages.
 
-Public API
-----------
-    show_prompt(text, duration_ms=None)
-    hide_prompt()
-
-    # compatibility for legacy code:
-    from prompts import prompt
-    prompt.show(text, duration_ms=None)
-    prompt.hide()
+Changes (v2.0)
+--------------
+• New visual design – white text on a pleasant blue frame:
+      · background  #3498db
+      · 4-pixel darker outline #2980b9
+• API unchanged:   show_prompt(text, duration_ms=None)   |   hide_prompt()
+• Legacy object `prompt.show()` / `prompt.hide()` still works.
 """
 
 from __future__ import annotations
@@ -27,22 +25,24 @@ from PyQt5.QtWidgets import QApplication, QWidget, QLabel
 # Internal overlay widget (singleton)
 # ───────────────────────────────────────────────────────────
 class _Overlay(QWidget):
-    """Frameless centred overlay with rounded dark background."""
+    """Frameless centred overlay with rounded blue frame & white text."""
 
     def __init__(self) -> None:
         flags = Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
         super().__init__(parent=None, flags=flags)
 
-        # transparent & click-through
+        # Transparent window & click-through
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
+        # Single centred label
         self._lbl = QLabel("", self, alignment=Qt.AlignCenter)
         self._lbl.setStyleSheet(
             """
             QLabel {
-                background: rgba(0, 0, 0, 200);
-                color: #ffffff;
+                background: #3498db;          /* blue fill              */
+                border: 4px solid #2980b9;    /* darker blue outline    */
+                color: #ffffff;               /* white text             */
                 font-family: "Segoe UI";
                 font-size: 24pt;
                 font-weight: 600;
@@ -52,6 +52,7 @@ class _Overlay(QWidget):
             """
         )
 
+        # Auto-hide timer (single-shot)
         self._timer = QTimer(self, singleShot=True)
         self._timer.timeout.connect(self.hide)
 
@@ -96,7 +97,7 @@ def _instance() -> _Overlay:
 # Public helper functions
 # ───────────────────────────────────────────────────────────
 def show_prompt(text: str, duration_ms: int | None = None) -> None:
-    """Show *text* overlay; hide after *duration_ms* if supplied."""
+    """Show *text* overlay; hide after *duration_ms* (if supplied)."""
     _instance().show_message(text, duration_ms)
 
 
@@ -109,7 +110,7 @@ def hide_prompt() -> None:
 # ───────────────────────────────────────────────────────────
 # Legacy compatibility  (object with .show / .hide)
 # ───────────────────────────────────────────────────────────
-class _PromptCompat:                      # pylint: disable=too-few-public-methods
+class _PromptCompat:
     @staticmethod
     def show(text: str, duration_ms: int | None = None) -> None:
         show_prompt(text, duration_ms)
@@ -119,16 +120,16 @@ class _PromptCompat:                      # pylint: disable=too-few-public-metho
         hide_prompt()
 
 
-prompt = _PromptCompat()        # what legacy imports expect
+prompt = _PromptCompat()   # what legacy imports expect
 
 __all__ = ["show_prompt", "hide_prompt", "prompt"]
 
 
 # ───────────────────────────────────────────────────────────
-# Demo (run `python prompts.py` for quick test)
+# Demo (run `python prompts.py` for a quick visual test)
 # ───────────────────────────────────────────────────────────
 if __name__ == "__main__":  # pragma: no cover
     app = QApplication(sys.argv)
-    show_prompt("מתחיל עסקה", 3000)
-    QTimer.singleShot(3500, lambda: show_prompt("תהליך התשלום הסתיים", 3000))
+    show_prompt("מתחיל עסקה", 2500)
+    QTimer.singleShot(3000, lambda: show_prompt("תהליך התשלום הסתיים", 3000))
     sys.exit(app.exec_())

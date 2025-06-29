@@ -1,86 +1,40 @@
 {
-  "timestamp": "2025-06-29 09:19:56",
-  "amount": 111.11,
+  "timestamp": "2025-06-29 12:26:44",
+  "amount": 1.22,
   "currency": "",
   "result": "הצלחה",
   "card": {
-    "masked_pan": "531084******9139",
+    "masked_pan": "532614******9345",
     "brand": "01",
     "issuer": "01",
-    "expiry": "0531"
+    "expiry": "0930"
   },
   "transaction": {
-    "type": "53",
-    "auth_num": "2071692",
-    "trans_id": "X98FMNZ-0003067",
-    "rrn": "518009071692"
+    "type": "01",
+    "auth_num": "0000000",
+    "trans_id": "X98FMNZ-0003110",
+    "rrn": "000000000000"
   },
-  "items": [
-    {
-      "terminal_name": "EMV WS Tווריפון"
-    },
-    {
-      "terminal_id": "0883662"
-    },
-    {
-      "app_version": "3_7_6_0000"
-    },
-    {
-      "ACQUIRER_ID": "71506"
-    },
-    {
-      "timestamp_local": "29/06/25 09:20"
-    },
-    {
-      "transaction_type": "עסקת זיכוי"
-    },
-    {
-      "amount_text": "111.11"
-    },
-    {
-      "currency_text": "ש\"ח"
-    },
-    {
-      "entry_mode": "Contactless EMV"
-    },
-    {
-      "ISSUER_AUTH_NUMBER": "2071692"
-    },
-    {
-      "authorizer": "חברה"
-    },
-    {
-      "uid": "25062909192608836623464"
-    },
-    {
-      "RRN": "518009071692"
-    },
-    {
-      "voucher_number": "68074005"
-    },
-    {
-      "card_name": "Mastercard"
-    },
-    {
-      "masked_pan_tail": "9139"
-    },
-    {
-      "credit_terms": "רגיל"
-    },
-    {
-      "chip_app_id": "A0000000041010"
-    },
-    {
-      "atc": "0134"
-    },
-    {
-      "TSI": "6800"
-    },
-    {
-      "TVR": "0000009001"
-    },
-    {
-      "ashrait_version": "4.17.0"
-    }
-  ]
+  "items": {
+    "terminal_name": "EMV WS Tווריפון",
+    "terminal_id": "0883662",
+    "app_version": "3_7_6_0000",
+    "timestamp_local": "29/06/25 12:27",
+    "transaction_type": "עסקת חיוב",
+    "amount_text": "1.22",
+    "currency_text": "ש\"ח",
+    "entry_mode": "Contactless EMV",
+    "authorizer": "כרטיס",
+    "uid": "25062912270608836624328",
+    "voucher_number": "68074037",
+    "card_name": "Mastercard",
+    "masked_pan_tail": "9345",
+    "credit_terms": "רגיל",
+    "chip_app_id": "A0000000041010",
+    "atc": "002F",
+    "TSI": "6800",
+    "arc": "Z1",
+    "TVR": "0400000001",
+    "ashrait_version": "4.17.0"
+  }
 }
