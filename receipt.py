@@ -91,7 +91,7 @@ def save_receipt(xml: str):
             "trans_id": _tag(xml, 'TRANS_ID'),
             "rrn":      _tag(xml, 'RRN'),
         },
-        "items": []
+        "items": {}
     }
 
     # Parse <RECEIPT_ARR>
@@ -102,7 +102,7 @@ def save_receipt(xml: str):
             title  = _tag(raw, 'HEBREW_TITLE')
             value  = _tag(raw, 'VALUE')
             key    = ID2EN.get(id_tag) or HE2EN.get(title) or id_tag or title or "unknown"
-            receipt["items"].append({key: value})
+            receipt["items"][key] = value
 
     # Write to disk
     with open("receipt.json", "w", encoding="utf-8") as f:
