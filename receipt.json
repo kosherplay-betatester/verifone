@@ -1,40 +1,42 @@
 {
-  "timestamp": "2025-06-29 12:26:44",
-  "amount": 1.22,
+  "timestamp": "2025-07-03 11:59:16",
+  "amount": 1.02,
   "currency": "",
   "result": "הצלחה",
   "card": {
-    "masked_pan": "532614******9345",
+    "masked_pan": "531084******9139",
     "brand": "01",
     "issuer": "01",
-    "expiry": "0930"
+    "expiry": "0531"
   },
   "transaction": {
     "type": "01",
-    "auth_num": "0000000",
-    "trans_id": "X98FMNZ-0003110",
-    "rrn": "000000000000"
+    "auth_num": "2097448",
+    "trans_id": "X98FMNZ-0003157",
+    "rrn": "518411097448"
   },
   "items": {
     "terminal_name": "EMV WS Tווריפון",
     "terminal_id": "0883662",
     "app_version": "3_7_6_0000",
-    "timestamp_local": "29/06/25 12:27",
+    "ACQUIRER_ID": "71506",
+    "timestamp_local": "03/07/25 11:59",
     "transaction_type": "עסקת חיוב",
-    "amount_text": "1.22",
+    "amount_text": "1.02",
     "currency_text": "ש\"ח",
     "entry_mode": "Contactless EMV",
-    "authorizer": "כרטיס",
-    "uid": "25062912270608836624328",
-    "voucher_number": "68074037",
+    "ISSUER_AUTH_NUMBER": "2097448",
+    "authorizer": "חברה",
+    "uid": "25070311585008836629507",
+    "RRN": "518411097448",
+    "voucher_number": "68074071",
     "card_name": "Mastercard",
-    "masked_pan_tail": "9345",
+    "masked_pan_tail": "9139",
     "credit_terms": "רגיל",
     "chip_app_id": "A0000000041010",
-    "atc": "002F",
-    "TSI": "6800",
-    "arc": "Z1",
-    "TVR": "0400000001",
+    "atc": "0151",
+    "TSI": "E800",
+    "TVR": "0000001001",
     "ashrait_version": "4.17.0"
   }
 }

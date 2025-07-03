@@ -1,28 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# network.py  –  FULL FILE  (v1.64 • start/end timestamps)
+# network.py  –  FULL FILE  (v1.63 • 12-digit amount support)
 
 """
 Networking helpers for the Verifone-P400 desktop app
 ====================================================
 
-Changes in v1.64
-----------------
-• `SockThread` now captures precise start/end `datetime` objects for every
-  request/response exchange and forwards them to `logger.log_traffic()`.
-• No other behaviour is altered.
-
-Command classes
----------------
 * QUICK_CMDS   = {"PING", "STATUS", "START_TRAN"}
-    – Stop reading when `<EVENT>COMPLETED>`
-    – chunk_timeout = 0.4 s   max_wait = 4 s
+    – Stop reading on <EVENT>COMPLETED>
+    – chunk_timeout = 0.4 s,  max_wait = 4 s
 
 * USER_CMDS    = {"DISCOVERY", "CARD_DATA", "SIGNATURE_CAPTURE"}
-    – Wait up to 65 s for user action
+    – Wait up to 65 s for user action (<EVENT>COMPLETED>)
 
 * RECEIPT_CMDS = {"AUTHORIZE", "FINISH_TRAN", "REFUND"}
-    – Wait for `</TRANSACTION>` (full receipt), 15 s max
+    – Wait for </TRANSACTION>  (full receipt), 15 s max
+
+* Any other command
+    – </TRANSACTION>, 10 s max
 """
 
 from __future__ import annotations
@@ -30,7 +25,6 @@ from __future__ import annotations
 import re
 import socket
 import queue
-from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread, Event
 from urllib.parse import urlparse, parse_qs
@@ -40,9 +34,7 @@ from logger import log_traffic
 from utils  import to_minor
 
 
-# ───────────────────────────────────────────────────────────
-# /pay restrictions
-# ───────────────────────────────────────────────────────────
+# ── /pay restrictions ─────────────────────────────────────
 VALID_TYPES = {"01", "02", "03", "06", "30", "53", "55"}
 
 
@@ -50,13 +42,9 @@ VALID_TYPES = {"01", "02", "03", "06", "30", "53", "55"}
 #                       SockThread
 # ══════════════════════════════════════════════════════════
 class SockThread(QThread):
-    """
-    One-shot TCP thread that sends a single XML command to the P400 and
-    collects the response.
-    """
+    """Per-request TCP thread talking to the P400."""
 
-    # (sent_xml, received_text) will be delivered back to the GUI
-    result = pyqtSignal(str, str)
+    result = pyqtSignal(str, str)           # (sent_xml, received_text)
 
     QUICK_CMDS   = {"PING", "STATUS", "START_TRAN"}
     USER_CMDS    = {"DISCOVERY", "CARD_DATA", "SIGNATURE_CAPTURE"}
@@ -68,7 +56,7 @@ class SockThread(QThread):
             return b"<EVENT>COMPLETED" in buf
         return b"</TRANSACTION>" in buf
 
-    def _timers(self, cmd: str) -> tuple[float, float]:
+    def _timers(self, cmd: str):
         if cmd in self.QUICK_CMDS:   return 0.4, 4.0
         if cmd in self.USER_CMDS:    return 3.0, 65.0
         if cmd in self.RECEIPT_CMDS: return 1.2, 15.0
@@ -81,11 +69,9 @@ class SockThread(QThread):
 
     # ---------- thread body ----------
     def run(self):
-        sent        = self.msg
-        recv_buf    = b""
-        start_time  = datetime.now()        # —— START timestamp
+        sent = self.msg
+        recv_buf = b""
 
-        # Extract command for timeout logic
         m   = re.search(r"<COMMAND>([^<]+)</COMMAND>", sent)
         cmd = m.group(1) if m else ""
         chunk_to, max_wait = self._timers(cmd)
@@ -94,7 +80,6 @@ class SockThread(QThread):
             with socket.create_connection((self.ip, self.port), timeout=3) as s:
                 s.sendall(sent.encode())
                 s.settimeout(chunk_to)
-
                 waited = 0.0
                 while waited < max_wait:
                     try:
@@ -110,13 +95,8 @@ class SockThread(QThread):
         except Exception as exc:
             recv_buf = f"Error: {exc}".encode()
 
-        recv_txt  = recv_buf.decode("utf-8", "replace")
-        end_time  = datetime.now()          # —— END timestamp
-
-        # NEW: forward timestamps to logger
-        log_traffic(sent, recv_txt, start_time, end_time)
-
-        # Emit to GUI
+        recv_txt = recv_buf.decode("utf-8", "replace")
+        log_traffic(sent, recv_txt)
         self.result.emit(sent, recv_txt)
 
 
@@ -127,12 +107,9 @@ class WebhookServer(Thread):
     """
     Tiny HTTP server exposing /pay and /receipt endpoints.
 
-    Features
-    --------
-    • /pay?amount=000000012345      – 12-digit minor units
-    • /pay?amount=123.45            – decimal shekels
-    • ?type=01 … 06 30 53 55        – transaction type
-    • ?wait=1                       – wait for receipt (JSON)
+    New feature (v1.63):
+        • /pay?amount=000000012345      – 12-digit minor units
+        • /pay?amount=123.45            – regular decimal
     """
 
     def __init__(self, host: str, port: int, callback):
@@ -154,7 +131,7 @@ class WebhookServer(Thread):
         outer = self
 
         class H(BaseHTTPRequestHandler):
-            # ――― helpers ―――
+            # helpers ----------------------------------------------------
             def _plain(self, st, body=b""):
                 self.send_response(st)
                 self.send_header("Content-Type", "text/plain")
@@ -172,7 +149,7 @@ class WebhookServer(Thread):
                 self.end_headers()
                 self.wfile.write(body)
 
-            # ――― CORS pre-flight ―――
+            # CORS pre-flight -------------------------------------------
             def do_OPTIONS(self):
                 self.send_response(204)
                 self.send_header("Access-Control-Allow-Origin", "*")
@@ -181,7 +158,7 @@ class WebhookServer(Thread):
                 self.send_header("Access-Control-Max-Age", "86400")
                 self.end_headers()
 
-            # ――― main GET ―――
+            # main GET ---------------------------------------------------
             def do_GET(self):
                 try:
                     p = urlparse(self.path)
@@ -190,15 +167,15 @@ class WebhookServer(Thread):
                     if p.path in ("/receipt", "/receipt.json"):
                         return self._json(200, outer._last)
 
-                    # /pay
+                    # /pay ------------------------------------------------
                     if p.path != "/pay":
                         return self._plain(404, b"Not Found")
 
                     q = parse_qs(p.query)
                     raw_amt = q.get("amount", [""])[0]
 
-                    # ----- amount parsing -------
-                    if re.fullmatch(r"\d{12}", raw_amt):      # 000000012345
+                    # ----- amount parsing (12-digit *or* decimal) -------
+                    if re.fullmatch(r"\d{12}", raw_amt):           # 000000012345
                         amt = int(raw_amt) / 100
                     else:
                         try:
@@ -236,7 +213,7 @@ class WebhookServer(Thread):
                     return  # client disconnected; ignore
 
             # suppress default logging
-            def log_message(self, *args):     # noqa: D401
+            def log_message(self, *args):  # noqa: D401
                 pass
 
         # Run HTTP server forever
