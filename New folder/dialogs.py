@@ -1,12 +1,19 @@
-# dialogs.py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# dialogs.py  –  FULL FILE  (v1.4 • “מיידית” ראשון + סינון דינמי)
+
 """
 Qt Dialogs
-----------
+==========
 
-- CreditTermDlg  – בחירת סוג אשראי / מספר תשלומים
-- DiscoverDlg    – קונפיגורציית DISCOVERY
+1. **CreditTermDlg** – בחירת סוג אשראי / מספר תשלומים  
+   • “03 מיידית” מוצג ראשון.  
+   • מוצגות *רק* האפשרויות שאושרו בתשובת DISCOVERY (ללא כפתורים מושבתים).  
+   • אם DISCOVERY לא איפשר אף סוג – מוצגת ברירת־מחדל “מיידית”.
 
-Both windows use a pastel-blue theme, “Segoe UI” fonts and rounded inputs.
+2. **DiscoverDlg** – חלון פרמטרים לפקודת DISCOVERY (לשם השלמות, ללא שינויי לוגיקה).
+
+שני החלונות משתמשים בערכת־צבע “pastel-blue”, גופן Segoe UI וקצוות מעוגלים.
 """
 
 from typing import Dict, Tuple
@@ -50,7 +57,7 @@ QDialog {
 QGroupBox {
     border: 1px solid #c9dff5;
     border-radius: 6px;
-    margin-top: 14px;               /* leave space for title */
+    margin-top: 14px;
     background: #ffffff;
 }
 QGroupBox::title {
@@ -62,9 +69,7 @@ QGroupBox::title {
 }
 
 /* labels */
-QLabel {
-    color: #34495e;
-}
+QLabel { color: #34495e; }
 
 /* editable fields */
 QLineEdit,
@@ -79,45 +84,64 @@ QComboBox {
 }
 
 /* check-boxes */
-QCheckBox {
-    spacing: 6px;
-}
+QCheckBox { spacing: 6px; }
 
 /* push-buttons */
 QPushButton {
     background: #3498db;
-    color: white;
+    color: #ffffff;
     border: none;
     border-radius: 4px;
     padding: 6px 18px;
     font-weight: 500;
 }
-QPushButton:hover { background: #2d89c8; }
+QPushButton:hover   { background: #2d89c8; }
 QPushButton:pressed { background: #2574ad; }
-QPushButton:disabled { background: #a7c3dd; }
+QPushButton:disabled{ background: #a7c3dd; }
 
 /* dialog-button-box buttons */
 QDialogButtonBox QPushButton { min-width: 90px; }
 """
 
 
-# ───────────────────────────────────────────────────────────
-#  Credit / Installments dialog
-# ───────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#                Credit / Installments dialog
+# ═══════════════════════════════════════════════════════════
 class CreditTermDlg(QDialog):
     """
-    Dialog לבחירת סוג אשראי / מס׳ תשלומים
-    • Always-on-top, application-modal.
+    בחירת סוג אשראי / מספר תשלומים
+
+    Parameters
+    ----------
+    flags : Dict[str, bool]
+        מפת דגלים שקיבלנו מתשובת DISCOVERY – אילו סוגי תשלום מותר לכרטיס.
+        המפתחות האפשריים:  regular, special, immediate, credit, installments
+    mn / mx : int
+        גבולות מספר-התשלומים כפי שנמסרו מה-P400.
+    total : float
+        סכום העסקה בשקלים לצורך חישוב "תשלום ראשון" / "תשלום המשך".
     """
 
-    _map = {
-        "01 רגילה": "1",
-        "02 דחויה(+30)": "2",
-        "03 מיידית": "3",
-        "06 אשראי": "6",
-        "08 תשלומים": "8",
+    # “03 מיידית” בראש לפי הדרישה
+    _map: Dict[str, str] = {
+        "03 מיידית":        "3",
+        "01 רגילה":         "1",
+        "02 דחויה(+30)":    "2",
+        "06 קרדיט":         "6",
+        "08 תשלומים":       "8",
     }
 
+    _map_field: Dict[str, str] = {
+        "1": "regular",
+        "2": "special",
+        "3": "immediate",
+        "6": "credit",
+        "8": "installments",
+    }
+
+    # ───────────────────────────────────────────────────────
+    # Construction
+    # ───────────────────────────────────────────────────────
     def __init__(
         self,
         flags: Dict[str, bool],
@@ -128,7 +152,7 @@ class CreditTermDlg(QDialog):
     ):
         super().__init__(parent)
 
-        # ---------- window prefs ----------
+        # Window prefs
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.setWindowModality(Qt.ApplicationModal)
         self.setWindowTitle("בחירת אשראי / תשלומים")
@@ -139,28 +163,29 @@ class CreditTermDlg(QDialog):
 
         self._total = total
 
+        # Layout root
         main = QVBoxLayout(self)
         main.setContentsMargins(18, 18, 18, 18)
         main.setSpacing(14)
 
-        # ――― credit type ―――
+        # ――― credit-type group ―――
         grp_type = QGroupBox("אפשרויות נתמכות")
         form_type = QFormLayout(grp_type)
         form_type.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         self.cmb = QComboBox()
+        added_any = False
         for label, code in self._map.items():
-            field = {
-                "1": "regular",
-                "2": "special",
-                "3": "immediate",
-                "6": "credit",
-                "8": "installments",
-            }[code]
+            field = self._map_field[code]
+            if not flags.get(field, False):
+                continue
             self.cmb.addItem(label, code)
-            self.cmb.model().item(self.cmb.count() - 1).setEnabled(
-                flags.get(field, False)
-            )
+            added_any = True
+
+        # Fallback: אם שום דבר לא נוסף – מציגים “מיידית”
+        if not added_any:
+            self.cmb.addItem("03 מיידית", "3")
+
         form_type.addRow("סוג אשראי", self.cmb)
         main.addWidget(grp_type)
 
@@ -171,30 +196,30 @@ class CreditTermDlg(QDialog):
         grid.setVerticalSpacing(8)
 
         # labels / editors
-        self.pay_lbl = QLabel("מס׳ תשלומים:")
+        self.pay_lbl   = QLabel("מס׳ תשלומים:")
         self.first_lbl = QLabel("תשלום ראשון ₪:")
-        self.next_lbl = QLabel("תשלום המשך ₪:")
-
+        self.next_lbl  = QLabel("תשלום המשך ₪:")
         for lbl in (self.pay_lbl, self.first_lbl, self.next_lbl):
             lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-        self.pay_spin = QSpinBox(minimum=mn, maximum=mx, value=mn)
+        self.pay_spin   = QSpinBox(minimum=mn, maximum=mx, value=mn)
         self.first_spin = QDoubleSpinBox(decimals=2, maximum=total, value=total / mn)
-        self.next_spin = QDoubleSpinBox(decimals=2, maximum=total)
+        self.next_spin  = QDoubleSpinBox(decimals=2, maximum=total)
         self.next_spin.setReadOnly(True)
 
-        grid.addWidget(self.pay_lbl, 0, 0)
-        grid.addWidget(self.pay_spin, 0, 1)
+        grid.addWidget(self.pay_lbl,   0, 0)
+        grid.addWidget(self.pay_spin,  0, 1)
         grid.addWidget(self.first_lbl, 1, 0)
-        grid.addWidget(self.first_spin, 1, 1)
-        grid.addWidget(self.next_lbl, 2, 0)
+        grid.addWidget(self.first_spin,1, 1)
+        grid.addWidget(self.next_lbl,  2, 0)
         grid.addWidget(self.next_spin, 2, 1)
 
-        # subtle divider
+        # horizontal separator
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
         sep.setFrameShadow(QFrame.Sunken)
         grid.addWidget(sep, 3, 0, 1, 2)
+
         main.addWidget(grp_pay)
 
         # ――― buttons ―――
@@ -207,30 +232,31 @@ class CreditTermDlg(QDialog):
         buttons.rejected.connect(self.reject)
         main.addWidget(buttons, alignment=Qt.AlignLeft)
 
-        # widgets toggled together
+        # instalments widgets toggled together
         self._inst_widgets = [
-            self.pay_lbl,
-            self.pay_spin,
-            self.first_lbl,
-            self.first_spin,
-            self.next_lbl,
-            self.next_spin,
+            self.pay_lbl, self.pay_spin,
+            self.first_lbl, self.first_spin,
+            self.next_lbl, self.next_spin,
         ]
 
-        # signal connections
+        # signals
         self.cmb.currentIndexChanged.connect(self._toggle_inst)
         self.pay_spin.valueChanged.connect(self._recalc_next)
         self.first_spin.valueChanged.connect(self._recalc_next)
 
-        self._toggle_inst()            # initial state
+        self._toggle_inst()  # initial
 
-    # ---------- raised / focused ----------
+    # ───────────────────────────────────────────────────────
+    # Qt events
+    # ───────────────────────────────────────────────────────
     def showEvent(self, e: QEvent):  # noqa: D401
         super().showEvent(e)
         self.raise_()
         self.activateWindow()
 
-    # ---------- internals ----------
+    # ───────────────────────────────────────────────────────
+    # Internals
+    # ───────────────────────────────────────────────────────
     def _toggle_inst(self):
         active = self.cmb.currentData() in ("6", "8")
         for w in self._inst_widgets:
@@ -240,17 +266,24 @@ class CreditTermDlg(QDialog):
     def _recalc_next(self):
         if not self.first_spin.isVisible():
             return
-        payments = max(1, self.pay_spin.value() - 1)
+        payments  = max(1, self.pay_spin.value() - 1)
         remaining = max(0.0, self._total - self.first_spin.value())
         nxt = remaining / payments if payments else 0.0
         self.next_spin.blockSignals(True)
         self.next_spin.setValue(round(nxt, 2))
         self.next_spin.blockSignals(False)
 
-    # ---------- public ----------
+    # ───────────────────────────────────────────────────────
+    # Public API
+    # ───────────────────────────────────────────────────────
     def data(self) -> Tuple[str, int, float, float]:
+        """
+        Returns
+        -------
+        (code, payments, first_payment, next_payment)
+        """
         code = self.cmb.currentData()
-        if code in ("6", "8"):
+        if code in ("6", "8"):  # אשראי / תשלומים
             return (
                 code,
                 self.pay_spin.value(),
@@ -260,12 +293,12 @@ class CreditTermDlg(QDialog):
         return code, 0, 0.0, 0.0
 
 
-# ───────────────────────────────────────────────────────────
-#  Discover-parameters dialog
-# ───────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+#                    Discover-parameters dialog
+# ═══════════════════════════════════════════════════════════
 class DiscoverDlg(QDialog):
     """
-    Dialog for DISCOVERY command parameters (same API, prettier UI).
+    Dialog for DISCOVERY command parameters (UI only).
     """
 
     def __init__(self, parent: QWidget | None = None):
@@ -289,116 +322,87 @@ class DiscoverDlg(QDialog):
         # — manual entry —
         man_box = QHBoxLayout()
         self.manual = QCheckBox("הזנה ידנית")
-        self.man_reason = QComboBox()
-        self.man_reason.addItems(["SIG", "CNP"])
+        self.man_reason = QComboBox(); self.man_reason.addItems(["SIG", "CNP"])
         self.man_reason.setEnabled(False)
         self.manual.toggled.connect(self.man_reason.setEnabled)
-        man_box.addWidget(self.manual)
-        man_box.addWidget(self.man_reason)
+        man_box.addWidget(self.manual); man_box.addWidget(self.man_reason)
         layout.addRow("Manual", man_box)
 
         # — transaction type —
         self.tran_type = QComboBox()
         self.tran_type.addItems(
-            [
-                "01 Regular",
-                "02 Unloading",
-                "03 Forced",
-                "06 Cashback",
-                "30 Balance",
-                "53 Refund",
-                "55 Loading",
-            ]
+            ["01 Regular", "02 Unloading", "03 Forced",
+             "06 Cashback", "30 Balance", "53 Refund", "55 Loading"]
         )
         layout.addRow("Tran. type", self.tran_type)
 
         # — amount / currency —
         amt_box = QHBoxLayout()
         self.amount = QDoubleSpinBox(decimals=2, maximum=999999, value=10.00)
-        self.currency = QComboBox()
-        self.currency.addItems(["376 NIS", "840 USD", "978 EUR"])
-        amt_box.addWidget(self.amount)
-        amt_box.addWidget(self.currency)
+        self.currency = QComboBox(); self.currency.addItems(["376 NIS", "840 USD", "978 EUR"])
+        amt_box.addWidget(self.amount); amt_box.addWidget(self.currency)
         layout.addRow("Amount / Curr", amt_box)
 
         # — cash back —
         cash_box = QHBoxLayout()
-        self.cash_chk = QCheckBox("Cash?")
-        self.cash_amt = QDoubleSpinBox(decimals=2, maximum=999999)
+        self.cash_chk = QCheckBox("Cash?"); self.cash_amt = QDoubleSpinBox(decimals=2, maximum=999999)
         self.cash_amt.setEnabled(False)
         self.cash_chk.toggled.connect(self.cash_amt.setEnabled)
-        cash_box.addWidget(self.cash_chk)
-        cash_box.addWidget(self.cash_amt)
+        cash_box.addWidget(self.cash_chk); cash_box.addWidget(self.cash_amt)
         layout.addRow("Cash back", cash_box)
 
         # — FX conversion —
         fx_box = QHBoxLayout()
         self.fx_chk = QCheckBox("Convert")
-        self.fx_to = QComboBox()
-        self.fx_to.addItems(["376 NIS", "840 USD", "978 EUR"])
+        self.fx_to  = QComboBox(); self.fx_to.addItems(["376 NIS", "840 USD", "978 EUR"])
         self.fx_amt = QDoubleSpinBox(decimals=2, maximum=999999)
-        for w in (self.fx_to, self.fx_amt):
-            w.setEnabled(False)
-        self.fx_chk.toggled.connect(
-            lambda b: [w.setEnabled(b) for w in (self.fx_to, self.fx_amt)]
-        )
-        fx_box.addWidget(self.fx_chk)
-        fx_box.addWidget(QLabel("to"))
-        fx_box.addWidget(self.fx_to)
-        fx_box.addWidget(QLabel("Amt"))
-        fx_box.addWidget(self.fx_amt)
+        for w in (self.fx_to, self.fx_amt): w.setEnabled(False)
+        self.fx_chk.toggled.connect(lambda b: [w.setEnabled(b) for w in (self.fx_to, self.fx_amt)])
+        fx_box.addWidget(self.fx_chk); fx_box.addWidget(QLabel("to"))
+        fx_box.addWidget(self.fx_to);  fx_box.addWidget(QLabel("Amt")); fx_box.addWidget(self.fx_amt)
         layout.addRow("FX convert", fx_box)
 
         # — token —
-        self.gen_token = QComboBox()
-        self.gen_token.addItems(["0 None", "1 All cards", "2 Shufersal"])
+        self.gen_token = QComboBox(); self.gen_token.addItems(["0 None", "1 All cards", "2 Shufersal"])
         layout.addRow("Gen token", self.gen_token)
 
         tok2_box = QHBoxLayout()
-        self.use_tok = QCheckBox("Use token")
-        self.tok_val = QLineEdit()
-        self.tok_val.setEnabled(False)
+        self.use_tok = QCheckBox("Use token"); self.tok_val = QLineEdit(); self.tok_val.setEnabled(False)
         self.use_tok.toggled.connect(self.tok_val.setEnabled)
-        tok2_box.addWidget(self.use_tok)
-        tok2_box.addWidget(self.tok_val)
+        tok2_box.addWidget(self.use_tok); tok2_box.addWidget(self.tok_val)
         layout.addRow("", tok2_box)
 
         # — service type —
-        self.service = QComboBox()
-        self.service.addItems(["", "1", "2", "3"])
+        self.service = QComboBox(); self.service.addItems(["", "1", "2", "3"])
         layout.addRow("Service type", self.service)
 
         # — flags —
         flag_box = QHBoxLayout()
-        self.ctls = QCheckBox("CTLS");  self.ctls.setChecked(True)
+        self.ctls = QCheckBox("CTLS");     self.ctls.setChecked(True)
         self.allow = QCheckBox("Allow cancel"); self.allow.setChecked(True)
         self.unatt = QCheckBox("Unattended")
-        flag_box.addWidget(self.ctls)
-        flag_box.addWidget(self.allow)
-        flag_box.addWidget(self.unatt)
+        flag_box.addWidget(self.ctls); flag_box.addWidget(self.allow); flag_box.addWidget(self.unatt)
         layout.addRow("Flags", flag_box)
 
         # — operation —
-        self.op = QComboBox()
-        self.op.addItems(["03 Inquiry", "04 Execute", "05 Authorize", "06 Capture"])
+        self.op = QComboBox(); self.op.addItems(["03 Inquiry", "04 Execute", "05 Authorize", "06 Capture"])
         layout.addRow("Operation", self.op)
 
         # — buttons —
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("Discover")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
 
-    # ---------- public ----------
+    # ───────────────────────────────────────────────────────
+    # Public helper
+    # ───────────────────────────────────────────────────────
     def data(self) -> Dict:
         return {
             "timeout": str(self.timeout.value()),
             "restrict_token": self.gen_token.currentText().split()[0],
             "manual": self.manual.isChecked(),
-            "manual_reason": self.man_reason.currentText()
-            if self.manual.isChecked()
-            else "",
+            "manual_reason": self.man_reason.currentText() if self.manual.isChecked() else "",
             "tran_type": self.tran_type.currentText().split()[0],
             "amount": to_minor(self.amount.value()),
             "currency": self.currency.currentText().split()[0],

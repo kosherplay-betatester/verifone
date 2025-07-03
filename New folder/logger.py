@@ -4,8 +4,14 @@
 logger.py  –  Dual-format network logger with 14-day rotation
 =============================================================
 
-v2.2.1  (bug-fix)
------------------
+v2.3  (hide ENTRY_MODE in readable log)
+---------------------------------------
+• Plain-text summary now strips every <ENTRY_MODE>…</ENTRY_MODE> pair before
+  pretty-printing the response, so operators no longer see the tag.
+• XML log is unchanged — the full payload is still preserved for auditing.
+
+Earlier v2.2.1
+--------------
 • Fixed stray quote in `_rotate_if_needed()` that caused a SyntaxError.
 • Retains v2.2 behaviour: every <event> carries `time=`, `start=`, `end=`,
   and each block includes <sent_time>/<recv_time>.
@@ -13,7 +19,9 @@ v2.2.1  (bug-fix)
 
 from __future__ import annotations
 
-import os, re, shutil
+import os
+import re
+import shutil
 from datetime import datetime, timedelta
 from typing import Final
 import xml.etree.ElementTree as ET
@@ -28,13 +36,20 @@ _HUM_FILE: Final[str] = "logs_readable.txt"
 _HUM_BAK:  Final[str] = "logs_readable.bak"
 _ROTATE_AFTER: Final[timedelta] = timedelta(days=14)
 
+# Tags to suppress in plain-text summaries
+_SUPPRESS_TAGS = [
+    "ENTRY_MODE",
+]
+
 # ───────────────────────────────────────────────────────────
 #  File-management helpers
 # ───────────────────────────────────────────────────────────
 def _ensure_xml_root() -> None:
+    """Create an opening <logs> tag if XML log is missing/empty."""
     if not os.path.exists(_XML_FILE) or os.path.getsize(_XML_FILE) == 0:
         with open(_XML_FILE, "w", encoding="utf-8") as fp:
             fp.write("<logs>\n")
+
 
 def _first_event_time() -> datetime | None:
     """Return timestamp of very first <event> (prefers time=, else start=)."""
@@ -51,7 +66,9 @@ def _first_event_time() -> datetime | None:
         pass
     return None
 
+
 def _rotate_if_needed() -> None:
+    """Rotate both logs if the oldest event is older than _ROTATE_AFTER."""
     first = _first_event_time()
     if not first or datetime.now() - first < _ROTATE_AFTER:
         return
@@ -80,26 +97,46 @@ def _pretty_xml(raw: str) -> str:
             )
         return pretty.strip()
     except Exception:
+        # fallback: insert newlines after '>'
         return re.sub(r">(?!\s)", ">\n", raw)
 
+
 def _cdata(txt: str) -> str:
+    """Wrap *txt* in a safe CDATA section."""
     return "<![CDATA[" + txt.replace("]]>", "]]]]><![CDATA[>") + "]]>"
+
+
+def _hide_tags(xml_txt: str) -> str:
+    """Remove every occurrence of each tag in _SUPPRESS_TAGS (inclusive)."""
+    for tag in _SUPPRESS_TAGS:
+        xml_txt = re.sub(
+            rf"<{tag}>[^<]*</{tag}>", "", xml_txt, flags=re.I | re.S
+        )
+    return xml_txt
+
 
 def _summarise(sent: str, recv: str,
                t_send: datetime, t_recv: datetime) -> str:
+    """Build plain-text block shown in logs_readable.txt."""
+    # Strip unwanted tags from RECV before pretty-printing
+    recv_clean = _hide_tags(recv)
+
     ts_s = t_send.strftime("%Y-%m-%d %H:%M:%S")
     ts_r = t_recv.strftime("%Y-%m-%d %H:%M:%S")
+
     cmd  = re.search(r"<COMMAND>([^<]+)</COMMAND>", sent)
     cmd_str = cmd.group(1) if cmd else "?"
-    rcd  = re.search(r"<RESULT_CODE>([^<]+)<", recv)
+
+    rcd  = re.search(r"<RESULT_CODE>([^<]+)<", recv_clean)
     rcd_str = f"  |  RESULT_CODE: {rcd.group(1)}" if rcd else ""
+
     return "\n".join([
         "-" * 72,
         f"{ts_s} START  | COMMAND: {cmd_str}{rcd_str}",
         f"SENT  @ {ts_s}",
         *("  " + ln for ln in _pretty_xml(sent).splitlines()),
         f"RECV  @ {ts_r}",
-        *("  " + ln for ln in _pretty_xml(recv).splitlines()),
+        *("  " + ln for ln in _pretty_xml(recv_clean).splitlines()),
         f"{ts_r} END",
         "-" * 72,
         ""
@@ -112,6 +149,9 @@ def log_traffic(sent: str, recv: str,
                 start_dt: datetime, end_dt: datetime) -> None:
     """
     Append one request/response pair to both logs with full timestamps.
+
+    • XML log keeps the *exact* payloads (no filtering).  
+    • Human-readable log suppresses tags listed in _SUPPRESS_TAGS.
     """
     _ensure_xml_root()
     _rotate_if_needed()

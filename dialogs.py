@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# dialogs.py  –  FULL FILE  (v1.4 • “מיידית” ראשון + סינון דינמי)
+# dialogs.py  –  FULL FILE  (v1.5 • “קרדיט” - רק מס׳ תשלומים)
 
 """
 Qt Dialogs
@@ -9,51 +9,36 @@ Qt Dialogs
 1. **CreditTermDlg** – בחירת סוג אשראי / מספר תשלומים  
    • “03 מיידית” מוצג ראשון.  
    • מוצגות *רק* האפשרויות שאושרו בתשובת DISCOVERY (ללא כפתורים מושבתים).  
-   • אם DISCOVERY לא איפשר אף סוג – מוצגת ברירת־מחדל “מיידית”.
+   • אם DISCOVERY לא איפשר אף סוג – מוצגת ברירת־מחדל “03 מיידית”.  
+   • **חדש (v1.5):** כאשר נבחר “06 קרדיט” יופיע *רק* השדה  
+     “מס׳ תשלומים”; שני שדות הסכום (תשלום ראשון / המשך) אינם מוצגים.
 
-2. **DiscoverDlg** – חלון פרמטרים לפקודת DISCOVERY (לשם השלמות, ללא שינויי לוגיקה).
-
-שני החלונות משתמשים בערכת־צבע “pastel-blue”, גופן Segoe UI וקצוות מעוגלים.
+2. **DiscoverDlg** – חלון פרמטרים לפקודת DISCOVERY (לשם השלמות).
 """
 
 from typing import Dict, Tuple
 
 from PyQt5.QtCore import Qt, QEvent
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui  import QFont
 from PyQt5.QtWidgets import (
-    QCheckBox,
-    QComboBox,
-    QDialog,
-    QDialogButtonBox,
-    QDoubleSpinBox,
-    QFormLayout,
-    QFrame,
-    QGridLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QSpinBox,
-    QVBoxLayout,
-    QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
+    QLabel, QLineEdit, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from utils import to_minor
 
 
 # ───────────────────────────────────────────────────────────
-#  Shared stylesheet  (pastel blue + rounded widgets)
+#  Shared pastel-blue stylesheet
 # ───────────────────────────────────────────────────────────
 _STYLE = """
-/* window */
 QDialog {
     background: #f6fbff;
     font-family: "Segoe UI";
     font-size: 10.5pt;
     color: #34495e;
 }
-
-/* group-boxes */
 QGroupBox {
     border: 1px solid #c9dff5;
     border-radius: 6px;
@@ -67,26 +52,15 @@ QGroupBox::title {
     font-weight: 600;
     color: #1d4f8b;
 }
-
-/* labels */
 QLabel { color: #34495e; }
-
-/* editable fields */
-QLineEdit,
-QSpinBox,
-QDoubleSpinBox,
-QComboBox {
+QLineEdit,QSpinBox,QDoubleSpinBox,QComboBox {
     border: 1px solid #b3cce6;
     border-radius: 4px;
     padding: 3px 6px;
     min-height: 24px;
     background: #ffffff;
 }
-
-/* check-boxes */
 QCheckBox { spacing: 6px; }
-
-/* push-buttons */
 QPushButton {
     background: #3498db;
     color: #ffffff;
@@ -98,8 +72,6 @@ QPushButton {
 QPushButton:hover   { background: #2d89c8; }
 QPushButton:pressed { background: #2574ad; }
 QPushButton:disabled{ background: #a7c3dd; }
-
-/* dialog-button-box buttons */
 QDialogButtonBox QPushButton { min-width: 90px; }
 """
 
@@ -109,28 +81,29 @@ QDialogButtonBox QPushButton { min-width: 90px; }
 # ═══════════════════════════════════════════════════════════
 class CreditTermDlg(QDialog):
     """
-    בחירת סוג אשראי / מספר תשלומים
+    חלון בחירת סוג אשראי / תשלומים.
 
     Parameters
     ----------
     flags : Dict[str, bool]
-        מפת דגלים שקיבלנו מתשובת DISCOVERY – אילו סוגי תשלום מותר לכרטיס.
-        המפתחות האפשריים:  regular, special, immediate, credit, installments
+        אילו סוגי תשלום מותר לכרטיס (מתשובת DISCOVERY).
+        המפתחות האפשריים: "regular", "special", "immediate", "credit", "installments"
     mn / mx : int
-        גבולות מספר-התשלומים כפי שנמסרו מה-P400.
+        גבולות מספר-התשלומים שהחזיר ה-P400.
     total : float
-        סכום העסקה בשקלים לצורך חישוב "תשלום ראשון" / "תשלום המשך".
+        סכום העסקה לשקלול סכומי תשלומים.
     """
 
-    # “03 מיידית” בראש לפי הדרישה
+    # כיתובי ממשק ➜ קוד אשראי
     _map: Dict[str, str] = {
-        "03 מיידית":        "3",
-        "01 רגילה":         "1",
-        "02 דחויה(+30)":    "2",
-        "06 קרדיט":         "6",
-        "08 תשלומים":       "8",
+        "03 מיידית":     "3",
+        "01 רגילה":      "1",
+        "02 דחויה(+30)": "2",
+        "06 קרדיט":      "6",
+        "08 תשלומים":    "8",
     }
 
+    # קוד ➜ שם דגל בתשובת DISCOVERY
     _map_field: Dict[str, str] = {
         "1": "regular",
         "2": "special",
@@ -168,7 +141,7 @@ class CreditTermDlg(QDialog):
         main.setContentsMargins(18, 18, 18, 18)
         main.setSpacing(14)
 
-        # ――― credit-type group ―――
+        # ―― group: credit type ――
         grp_type = QGroupBox("אפשרויות נתמכות")
         form_type = QFormLayout(grp_type)
         form_type.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -181,19 +154,15 @@ class CreditTermDlg(QDialog):
                 continue
             self.cmb.addItem(label, code)
             added_any = True
-
-        # Fallback: אם שום דבר לא נוסף – מציגים “מיידית”
-        if not added_any:
+        if not added_any:                       # Fallback – Immediate
             self.cmb.addItem("03 מיידית", "3")
 
         form_type.addRow("סוג אשראי", self.cmb)
         main.addWidget(grp_type)
 
-        # ――― installment details ―――
+        # ―― group: installment details ――
         grp_pay = QGroupBox("פרטי תשלומים")
-        grid = QGridLayout(grp_pay)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(8)
+        grid = QGridLayout(grp_pay); grid.setHorizontalSpacing(12); grid.setVerticalSpacing(8)
 
         # labels / editors
         self.pay_lbl   = QLabel("מס׳ תשלומים:")
@@ -207,32 +176,22 @@ class CreditTermDlg(QDialog):
         self.next_spin  = QDoubleSpinBox(decimals=2, maximum=total)
         self.next_spin.setReadOnly(True)
 
-        grid.addWidget(self.pay_lbl,   0, 0)
-        grid.addWidget(self.pay_spin,  0, 1)
-        grid.addWidget(self.first_lbl, 1, 0)
-        grid.addWidget(self.first_spin,1, 1)
-        grid.addWidget(self.next_lbl,  2, 0)
-        grid.addWidget(self.next_spin, 2, 1)
+        grid.addWidget(self.pay_lbl,   0, 0); grid.addWidget(self.pay_spin,  0, 1)
+        grid.addWidget(self.first_lbl, 1, 0); grid.addWidget(self.first_spin,1, 1)
+        grid.addWidget(self.next_lbl,  2, 0); grid.addWidget(self.next_spin, 2, 1)
 
-        # horizontal separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setFrameShadow(QFrame.Sunken)
+        sep = QFrame(); sep.setFrameShape(QFrame.HLine); sep.setFrameShadow(QFrame.Sunken)
         grid.addWidget(sep, 3, 0, 1, 2)
-
         main.addWidget(grp_pay)
 
-        # ――― buttons ―――
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, Qt.Horizontal, self
-        )
+        # ―― buttons ――
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, Qt.Horizontal, self)
         buttons.button(QDialogButtonBox.Ok).setText("אישור")
         buttons.button(QDialogButtonBox.Cancel).setText("ביטול")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
         main.addWidget(buttons, alignment=Qt.AlignLeft)
 
-        # instalments widgets toggled together
+        # Installment-related widgets grouped יחד לנוחות
         self._inst_widgets = [
             self.pay_lbl, self.pay_spin,
             self.first_lbl, self.first_spin,
@@ -244,26 +203,41 @@ class CreditTermDlg(QDialog):
         self.pay_spin.valueChanged.connect(self._recalc_next)
         self.first_spin.valueChanged.connect(self._recalc_next)
 
-        self._toggle_inst()  # initial
+        self._toggle_inst()  # initial state
 
     # ───────────────────────────────────────────────────────
     # Qt events
     # ───────────────────────────────────────────────────────
     def showEvent(self, e: QEvent):  # noqa: D401
         super().showEvent(e)
-        self.raise_()
-        self.activateWindow()
+        self.raise_(); self.activateWindow()
 
     # ───────────────────────────────────────────────────────
     # Internals
     # ───────────────────────────────────────────────────────
     def _toggle_inst(self):
-        active = self.cmb.currentData() in ("6", "8")
-        for w in self._inst_widgets:
-            w.setVisible(active)
-        self._recalc_next()
+        """הצג/הסתר שדות בהתאם לסוג אשראי שנבחר."""
+        code = self.cmb.currentData()
+
+        # קרדיט (06) – רק “מס׳ תשלומים”
+        if code == "6":
+            for w in self._inst_widgets:
+                w.setVisible(False)
+            self.pay_lbl.setVisible(True); self.pay_spin.setVisible(True)
+
+        # תשלומים (08) – כל השדות
+        elif code == "8":
+            for w in self._inst_widgets:
+                w.setVisible(True)
+            self._recalc_next()
+
+        # מיידית / רגילה / דחויה – ללא שדות
+        else:
+            for w in self._inst_widgets:
+                w.setVisible(False)
 
     def _recalc_next(self):
+        """חשב סכום ‘תשלום המשך’ כאשר רלוונטי."""
         if not self.first_spin.isVisible():
             return
         payments  = max(1, self.pay_spin.value() - 1)
@@ -280,16 +254,24 @@ class CreditTermDlg(QDialog):
         """
         Returns
         -------
-        (code, payments, first_payment, next_payment)
+        tuple (code, payments, first_payment, next_payment)
         """
         code = self.cmb.currentData()
-        if code in ("6", "8"):  # אשראי / תשלומים
+
+        # קרדיט – מחזיר סכומים 0 כדי שלא יישלחו
+        if code == "6":
+            return code, self.pay_spin.value(), 0.0, 0.0
+
+        # תשלומים – כל הערכים
+        if code == "8":
             return (
                 code,
                 self.pay_spin.value(),
                 self.first_spin.value(),
                 self.next_spin.value(),
             )
+
+        # אחרים – רק קוד
         return code, 0, 0.0, 0.0
 
 
@@ -297,9 +279,7 @@ class CreditTermDlg(QDialog):
 #                    Discover-parameters dialog
 # ═══════════════════════════════════════════════════════════
 class DiscoverDlg(QDialog):
-    """
-    Dialog for DISCOVERY command parameters (UI only).
-    """
+    """Dialog for DISCOVERY command parameters (UI only)."""
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -378,7 +358,7 @@ class DiscoverDlg(QDialog):
 
         # — flags —
         flag_box = QHBoxLayout()
-        self.ctls = QCheckBox("CTLS");     self.ctls.setChecked(True)
+        self.ctls = QCheckBox("CTLS"); self.ctls.setChecked(True)
         self.allow = QCheckBox("Allow cancel"); self.allow.setChecked(True)
         self.unatt = QCheckBox("Unattended")
         flag_box.addWidget(self.ctls); flag_box.addWidget(self.allow); flag_box.addWidget(self.unatt)
