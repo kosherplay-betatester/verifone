@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# pay_process.py  –  FULL FILE  (v4.1 • white-text prompts, unchanged FSM)
-
+# pay_process.py  –  FULL FILE  (v4.2 • ENTRY_MODE removed, white-text prompts retained)
 """
-Quick-Sale finite-state machine extracted from gui/main_window.py v1.65.
+Quick-Sale finite-state machine extracted from gui/main_window.py.
 
 Visual layer
 ============
-Every call to ``show_prompt()`` passes *plain text* (no HTML).  
-Because the updated prompts.py stylesheet paints a blue frame
-(#3498db fill, #2980b9 outline) with *white* text, all messages now appear
-white-on-blue:
+All calls to ``show_prompt()`` still pass *plain text*; the stylesheet in
+*prompts.py* renders a blue panel with white text, so runtime behaviour is
+unchanged:
 
     התחלת עסקה
     זיהוי כרטיס
@@ -22,15 +20,21 @@ white-on-blue:
     העסקה נכשלה
     נדחה ע`י חברה
 
-FSM & business logic
-====================
-Identical to original v1.65:
+Functional change
+=================
+The app no longer transmits an ``<ENTRY_MODE>`` element in any message:
+
+* `_disc_body()` (used by DISCOVERY, AUTHORIZE, VOID)  
+  - removed `" <ENTRY_MODE>04</ENTRY_MODE>"`
+
+* `xml_sign.template_xml()` (DISCOVERY stub) — kept in sync separately.
+
+FSM flow is otherwise identical to v1.65:
 
 PING → STATUS → START_TRAN → DISCOVERY → AUTHORIZE → FINISH_TRAN  
-Automatic recovery (GET_TRAN_DETAILS + VOID) if AUTHORIZE completes
-without EVENT=COMPLETED.  RESULT_CODE 2 triggers auto-cancel, etc.
+Automatic recovery (`GET_TRAN_DETAILS` + `VOID`) if AUTHORIZE finishes
+without `EVENT=COMPLETED`. `RESULT_CODE 2` triggers auto-cancel, etc.
 """
-
 from __future__ import annotations
 
 import re
@@ -147,6 +151,11 @@ class QuickSaleMixin:
     # Body builders
     # ------------------------------------------------------------------
     def _disc_body(self, o: Dict) -> str:
+        """
+        Build the <TRANSACTION_DETAILS> for DISCOVERY/AUTHORIZE/VOID.
+
+        NOTE:  <ENTRY_MODE> **REMOVED** (no longer required by P400).
+        """
         parts: List[str] = [
             f"<TIMEOUT>{o['timeout']}</TIMEOUT>",
             "<TRANSACTION_DETAILS>",
@@ -156,7 +165,7 @@ class QuickSaleMixin:
             f"<ALLOW_CANCEL>{int(o['allow_cancel'])}</ALLOW_CANCEL>",
             f"<UNATTENDED>{int(o['unattended'])}</UNATTENDED>",
             f"<TRAN_TYPE>{o['tran_type']}</TRAN_TYPE>",
-            "<MTI>100</MTI><ENTRY_MODE>04</ENTRY_MODE>",
+            "<MTI>100</MTI>",
             f"<TRANSACTION_AMOUNT>{o['amount']}</TRANSACTION_AMOUNT>",
             f"<ORIGINAL_CURRENCY>{o['currency']}</ORIGINAL_CURRENCY>",
         ]

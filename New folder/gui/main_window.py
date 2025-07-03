@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# gui/main_window.py  –  FULL FILE  (v2.0 • Quick-Sale FSM extracted)
+# gui/main_window.py  –  FULL FILE  (v2.1 • all-black logs)
 
 """
 Main admin window for Verifone-P400 desktop app
 ==============================================
 
-Changes in v2.0
+Changes in v2.1
 ---------------
-• **Payment logic removed** – All Quick-Sale / FSM code now lives in
-  *pay_process.py* (imported as `QuickSaleMixin`).
-• Added Hebrew on-screen prompts via `prompts.show_prompt()` (handled
-  inside the mixin).
-• The rest of the file is an unchanged admin UI: settings, register /
-  key-exchange, status / EOD, XML sandbox, logging, and webhook server.
+• All log messages (INFO / WARN / ERROR) are now forced to black text
+  so the two panes show a single, consistent colour.
+
+Earlier changes in v2.0
+-----------------------
+• Payment logic moved to *pay_process.py* (`QuickSaleMixin`).
+• Added Hebrew on-screen prompts via `prompts.show_prompt()`.
 """
 
 from __future__ import annotations
@@ -134,7 +135,8 @@ class MainWindow(QuickSaleMixin, QMainWindow):  # mixin *first* in MRO
         row.addWidget(self.qs_amount)
         self.qs_btn = QPushButton("Quick Sale")
         self.qs_btn.setEnabled(bool(self.mac_key))
-        self.qs_btn.clicked.connect(lambda: self.quick_sale(self.qs_amount.value(), "01"))
+        self.qs_btn.clicked.connect(
+            lambda: self.quick_sale(self.qs_amount.value(), "01"))
         row.addWidget(self.qs_btn); row.addStretch(1)
         row.addWidget(QLabel("Admin CMD"))
         self.admin_edit = QLineEdit()
@@ -234,18 +236,21 @@ class MainWindow(QuickSaleMixin, QMainWindow):  # mixin *first* in MRO
             self._crit("Settings", f"Save failed: {exc}")
 
     # ══════════════════════════════════════════════════════
-    # Convenience log helpers
+    # Convenience log helpers  (all-black text)
     # ══════════════════════════════════════════════════════
     def _info(self, title: str, text: str):
-        self.sent_log.append(f'<span style="color:#27ae60;">[INFO] {title}: {text}</span>')
+        self.sent_log.append(
+            f'<span style="color:#000000;">[INFO] {title}: {text}</span>')
         self.sent_log.moveCursor(QTextCursor.End)
 
     def _warn(self, title: str, text: str):
-        self.recv_log.append(f'<span style="color:#e67e22;">[WARN] {title}: {text}</span>')
+        self.recv_log.append(
+            f'<span style="color:#000000;">[WARN] {title}: {text}</span>')
         self.recv_log.moveCursor(QTextCursor.End)
 
     def _crit(self, title: str, text: str):
-        self.recv_log.append(f'<span style="color:#c0392b;">[ERROR] {title}: {text}</span>')
+        self.recv_log.append(
+            f'<span style="color:#000000;">[ERROR] {title}: {text}</span>')
         self.recv_log.moveCursor(QTextCursor.End)
 
     # ══════════════════════════════════════════════════════
