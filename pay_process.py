@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# pay_process.py  –  FULL FILE  (v4.5 • spinner + cross-thread fix)
+# pay_process.py  –  FULL FILE  (v4.6 • Manual / Regular chooser)
 
 """
 Quick-Sale finite-state machine
-==============================
+===============================
 
-v4.5
-----
-1. **Spinner UI** (introduced in v4.4) remains unchanged.
-2. **Cross-thread safety** – any Quick-Sale request arriving from the
-   background *WebhookServer* thread is now marshalled to the GUI thread
-   via a dedicated Qt signal, eliminating:
-      • QObject::startTimer warnings
-      • QObject::setParent errors
-   All UI calls (show_spinner / show_prompt / etc.) therefore execute
-   strictly in the main thread.
+v4.6  (2025-07-06)
+------------------
+1. **בחירת רגיל / ידני** – מיד עם התחלת Quick-Sale מוצג חלון קטן
+   ששואל את הקופאי אם לבצע עסקה *רגילה* (ברירת-מחדל) או *ידנית*
+   (הקלדת מספר כרטיס ב-P400).  
+   • Enter = OK • Esc / Cancel = ביטול עסקה.  
+   • הבחירה מעודכנת בשדות `<MANUAL>` ו-`<MANUAL_REASON>` (DISCOVERY).
+2. הספינר מוצג *רק אחרי* אישור הדיאלוג – אין “מעבד תשלום…” לפני
+   שהקופאי החליט.
+3. שום היגיון עסקי אחר לא השתנה (מתבסס על v4.5).
 
-No business logic has been modified otherwise.
+-------------------------------------------------------------------------------
+הקובץ מכיל:
+• _ManualChoiceDlg – דיאלוג לבחור “רגיל / ידני”.
+• QuickSaleMixin   – כל ה-FSM + שילוב הדיאלוג החדש.
 """
 
 from __future__ import annotations
@@ -25,8 +28,12 @@ from __future__ import annotations
 import re
 from typing import Dict, List
 
-from PyQt5.QtCore    import QTimer, pyqtSlot, pyqtSignal, Qt
-from PyQt5.QtWidgets import QDialog
+from PyQt5.QtCore    import Qt, QTimer, pyqtSignal, pyqtSlot
+from PyQt5.QtGui     import QFont
+from PyQt5.QtWidgets import (
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout,
+    QLabel, QVBoxLayout
+)
 
 from dialogs   import CreditTermDlg
 from receipt   import save_receipt
@@ -36,18 +43,51 @@ from config    import save_mac
 from prompts   import show_prompt, hide_prompt, show_spinner, hide_spinner
 
 
-# ════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+#        Mini dialog – Regular / Manual  (default Regular)
+# ═══════════════════════════════════════════════════════════
+class _ManualChoiceDlg(QDialog):
+    """Choice dialog; *Regular* is default, Enter==OK, Esc==Cancel."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setWindowTitle("בחר סוג הזנה")
+        self.setLayoutDirection(Qt.RightToLeft)
+        self.setFont(QFont("Segoe UI", 10))
+
+        layout = QVBoxLayout(self)
+        form   = QFormLayout(); layout.addLayout(form)
+
+        self.cmb = QComboBox()
+        self.cmb.addItem("הצגת כרטיס (תקני)", False)          # data = manual?
+        self.cmb.addItem("ידני (הקלדת כרטיס)", True)
+        form.addRow(QLabel("סוג עסקה:"), self.cmb)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Ok).setText("אישור")
+        btns.button(QDialogButtonBox.Cancel).setText("ביטול")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def is_manual(self) -> bool:
+        """Return True if user selected Manual entry."""
+        return bool(self.cmb.currentData())
+
+
+# ═══════════════════════════════════════════════════════════
 #                     QuickSaleMixin
-# ════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
 class QuickSaleMixin:
 
-    # ---------- inter-thread signal ----------
+    # ---------- cross-thread bridge ----------
     enqueue_qs = pyqtSignal(float, str)
 
-    # ---------- ctor ----------
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)        # keep MRO intact
-        self.enqueue_qs.connect(self.quick_sale) # GUI-thread slot
+        self.enqueue_qs.connect(self.quick_sale)
 
     # ------------------------------------------------------------------
     # Public entry  (runs in GUI thread only)
@@ -66,19 +106,36 @@ class QuickSaleMixin:
         amount, code = self.qs_queue.pop(0)
         self._launch_qs(amount, code)
 
+    # ------------------------------------------------------------------
+    # Main launcher – now with Regular/Manual dialog
+    # ------------------------------------------------------------------
     def _launch_qs(self, amount: float, code: str):
-        hide_prompt()                       # clear previous overlay
-        show_spinner("מעבד תשלום…")         # activity indicator
+        # ── 1) clear any previous overlays ──
+        hide_prompt()
+        hide_spinner()
+
+        # ── 2) ask cashier: Regular / Manual ──
+        dlg = _ManualChoiceDlg(None)
+        if dlg.exec_() != QDialog.Accepted:
+            show_prompt("העסקה בוטלה", 3000)
+            self._qs_done()
+            return
+        manual_selected = dlg.is_manual()
+
+        # ── 3) show spinner only after confirmation ──
+        show_spinner("מעבד תשלום…")
+
+        # ── 4) init FSM state ──
         self.session         = rand_session()
         self._current_amount = amount
         self.qs_amount.setValue(amount)
 
-        # —— Discovery defaults (NO <ENTRY_MODE>) ———————————
+        # DISCOVERY defaults (no ENTRY_MODE)
         self.qs_defaults = {
             "timeout":        "60",
             "restrict_token": "0",
-            "manual":         False,
-            "manual_reason":  "",
+            "manual":         manual_selected,
+            "manual_reason":  "SIG" if manual_selected else "",
             "tran_type":      code,
             "amount":         to_minor(amount),
             "currency":       "376",
@@ -110,7 +167,7 @@ class QuickSaleMixin:
         self._send(ping)
 
     # ------------------------------------------------------------------
-    # Send helpers
+    # Send helpers  (unchanged from v4.5)
     # ------------------------------------------------------------------
     def _send_status(self):
         self._qs_phase = "STATUS"
@@ -143,17 +200,13 @@ class QuickSaleMixin:
     # ------------------------------------------------------------------
     @pyqtSlot(float, str)
     def _from_webhook(self, amount: float, tran_type: str):
-        """
-        Publish Quick-Sale request coming from /pay HTTP call.
-        Signal ensures execution in the GUI thread.
-        """
+        """Publish Quick-Sale request coming from /pay HTTP call."""
         self.enqueue_qs.emit(amount, tran_type)
 
     # ------------------------------------------------------------------
     # Body builders
     # ------------------------------------------------------------------
     def _disc_body(self, o: Dict) -> str:
-        """Build the DISCOVERY body (without ENTRY_MODE)."""
         parts: List[str] = [
             f"<TIMEOUT>{o['timeout']}</TIMEOUT>",
             "<TRANSACTION_DETAILS>",
@@ -185,7 +238,6 @@ class QuickSaleMixin:
 
     def _auth_body(self, base: Dict, ct: str,
                    pay: int, first: float, nxt: float) -> str:
-        """Extend DISCOVERY body for AUTHORIZE."""
         body = self._disc_body(base)
         patch = f"<CREDIT_TERMS>{ct}</CREDIT_TERMS>"
         if pay:
@@ -202,14 +254,11 @@ class QuickSaleMixin:
     # ------------------------------------------------------------------
     def _handle_discovery_ok(self, recv: str):
         """Process a successful DISCOVERY response."""
-        # Save TRANS_ID in case recovery is needed
         self._trans_id = re.search(r"<TRANS_ID>([^<]+)</TRANS_ID>", recv).group(1)
 
-        # Which credit terms are allowed?
         flags = {k: bool(re.search(fr"<TERMS_{k.upper()}>1</TERMS_{k.upper()}>", recv))
                  for k in ("regular", "special", "immediate", "credit", "installments")}
 
-        # Debit detection: Immediate-only OR Maestro BRAND 08
         is_debit = (
             (flags.get("immediate") and not any(flags[x] for x in ("regular", "special", "credit", "installments")))
             or bool(re.search(r"<BRAND>\s*08\s*</BRAND>", recv))
@@ -219,7 +268,6 @@ class QuickSaleMixin:
             self._send_cancel()
             return
 
-        # ——— credit-capable flow ——————————————
         def _int(tag, default):
             m = re.search(fr"<{tag}>(\d+)", recv)
             return int(m.group(1)) if m else default
@@ -242,7 +290,7 @@ class QuickSaleMixin:
         self._send(xml)
 
     # ------------------------------------------------------------------
-    # Auto-cancel & recovery helpers
+    # Auto-cancel & recovery helpers (unchanged)
     # ------------------------------------------------------------------
     def _schedule_cancel(self):
         if self._awaiting_cancel:
@@ -287,9 +335,9 @@ class QuickSaleMixin:
         self._qs_phase = "VOID"
         self._send(xml)
 
-    # ═══════════════════════════════════════
-    # CENTRAL RESPONSE HANDLER
-    # ═══════════════════════════════════════
+    # ═══════════════════════════════════════════════════════
+    # CENTRAL RESPONSE HANDLER  (identical to v4.5)
+    # ═══════════════════════════════════════════════════════
     def _handle_response(self, sent: str, recv: str):
         """Top-level FSM dispatcher."""
         self.sent_log.append(sent)
@@ -318,7 +366,6 @@ class QuickSaleMixin:
             # ---------- STATUS ----------
             if "<COMMAND>STATUS" in sent:
                 if "<RESULT_CODE>0<" in recv:
-                    # SHVA terminal-ID validation
                     expected = self.termid_field.text().strip()
                     m_tid = re.search(r"<SHVA_TERM_ID>(\d+)</SHVA_TERM_ID>", recv)
                     if expected and m_tid and m_tid.group(1) != expected:
@@ -327,7 +374,6 @@ class QuickSaleMixin:
                         self._send_cancel()
                         self._qs_done()
                         return
-                    # Auto-EOD if SHVA_STATUS ≠ 1
                     if re.search(r"<SHVA_STATUS>(?!1)", recv):
                         self.cmd_eod()
                     self._send_start_tran()

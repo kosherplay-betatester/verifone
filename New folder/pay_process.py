@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# pay_process.py  –  FULL FILE  (v4.3 • abort on debit / discovery fail)
+# pay_process.py  –  FULL FILE  (v4.5 • spinner + cross-thread fix)
 
 """
 Quick-Sale finite-state machine
-===============================
+==============================
 
-Changes in v4.3
----------------
-1. If DISCOVERY shows a **debit / non-credit** card  
-   (Immediate-only *or* BRAND 08 Maestro) we now **abort** the flow:
-      • Show prompt  “זיהוי כרטיס נכשל”  
-      • Send CANCEL to the P400  
-      • Skip the ‘Credit Terms’ dialog completely.
+v4.5
+----
+1. **Spinner UI** (introduced in v4.4) remains unchanged.
+2. **Cross-thread safety** – any Quick-Sale request arriving from the
+   background *WebhookServer* thread is now marshalled to the GUI thread
+   via a dedicated Qt signal, eliminating:
+      • QObject::startTimer warnings
+      • QObject::setParent errors
+   All UI calls (show_spinner / show_prompt / etc.) therefore execute
+   strictly in the main thread.
 
-2. If DISCOVERY itself returns  RESULT_CODE ≠ 0  
-   the same prompt is shown and the payment is abandoned.
-
-Everything else (PING → STATUS → START_TRAN → … etc.) is unchanged from v4.2.
+No business logic has been modified otherwise.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List
 
-from PyQt5.QtCore    import pyqtSlot, QTimer
+from PyQt5.QtCore    import QTimer, pyqtSlot, pyqtSignal, Qt
 from PyQt5.QtWidgets import QDialog
 
 from dialogs   import CreditTermDlg
@@ -33,18 +33,27 @@ from receipt   import save_receipt
 from utils     import rand_session, to_minor, des3_decrypt
 from xml_sign  import env_xml
 from config    import save_mac
-from prompts   import show_prompt, hide_prompt
+from prompts   import show_prompt, hide_prompt, show_spinner, hide_spinner
 
 
 # ════════════════════════════════════════════════════════
 #                     QuickSaleMixin
 # ════════════════════════════════════════════════════════
 class QuickSaleMixin:
+
+    # ---------- inter-thread signal ----------
+    enqueue_qs = pyqtSignal(float, str)
+
+    # ---------- ctor ----------
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)        # keep MRO intact
+        self.enqueue_qs.connect(self.quick_sale) # GUI-thread slot
+
     # ------------------------------------------------------------------
-    # Public entry
+    # Public entry  (runs in GUI thread only)
     # ------------------------------------------------------------------
     def quick_sale(self, amount: float, tran_type: str = "01"):
-        """Add a Quick-Sale request to the queue."""
+        """Enqueue a Quick-Sale request and launch if idle."""
         self.qs_queue.append((amount, tran_type))
         self._start_next_qs()
 
@@ -58,7 +67,8 @@ class QuickSaleMixin:
         self._launch_qs(amount, code)
 
     def _launch_qs(self, amount: float, code: str):
-        hide_prompt()                                  # clear previous overlay
+        hide_prompt()                       # clear previous overlay
+        show_spinner("מעבד תשלום…")         # activity indicator
         self.session         = rand_session()
         self._current_amount = amount
         self.qs_amount.setValue(amount)
@@ -123,16 +133,21 @@ class QuickSaleMixin:
 
     def _qs_done(self):
         """Mark current Quick-Sale finished and launch next, if any."""
+        hide_spinner()
         self.qs_active = False
         self._qs_phase = ""
         self._start_next_qs()
 
     # ------------------------------------------------------------------
-    # Webhook bridge
+    # Webhook bridge  (called from background thread)
     # ------------------------------------------------------------------
     @pyqtSlot(float, str)
     def _from_webhook(self, amount: float, tran_type: str):
-        self.quick_sale(amount, tran_type)
+        """
+        Publish Quick-Sale request coming from /pay HTTP call.
+        Signal ensures execution in the GUI thread.
+        """
+        self.enqueue_qs.emit(amount, tran_type)
 
     # ------------------------------------------------------------------
     # Body builders
@@ -200,7 +215,6 @@ class QuickSaleMixin:
             or bool(re.search(r"<BRAND>\s*08\s*</BRAND>", recv))
         )
         if is_debit:
-            # Abort – prompt + CANCEL
             show_prompt("זיהוי כרטיס נכשל", 4000)
             self._send_cancel()
             return
@@ -240,6 +254,7 @@ class QuickSaleMixin:
         self._cancel_timer.start(2000)
 
     def _send_cancel(self):
+        hide_spinner()
         self._awaiting_cancel = False
         xml = env_xml("GENERAL", "CANCEL", self.session,
                       bool(int(self.train_combo.currentText())), self.mac_key)
@@ -340,7 +355,6 @@ class QuickSaleMixin:
                 if "<RESULT_CODE>0<" in recv:
                     self._handle_discovery_ok(recv)
                 else:
-                    # Failure → prompt & abort
                     show_prompt("זיהוי כרטיס נכשל", 4000)
                     self._qs_done()
                 return
