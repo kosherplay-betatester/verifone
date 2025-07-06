@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# pay_process.py  –  FULL FILE  (v4.2 • ENTRY_MODE removed + כרטיס דביט)
+# pay_process.py  –  FULL FILE  (v4.3 • abort on debit / discovery fail)
 
 """
 Quick-Sale finite-state machine
 ===============================
 
-שינויים מהותיים ב-v4.2
-----------------------
-1. **ENTRY_MODE** אינו נשלח יותר – השדה הוסר לחלוטין מכל הבקשות
-   (כדי שלא יופיע גם ברשימת ה-Receipt).
-2. בעת DISCOVERY, אם מזוהה **כרטיס דביט** (כלומר:
-   - *רק* Immediate מותר    **או**    BRAND==08  Maestro),
-   חלון “אפשרויות תשלום” יציג *רק* “03 מיידית”.
-   בדיאלוג, “מיידית” מופיעה כברירת-מחדל כראשונה (ראו dialogs.py).
+Changes in v4.3
+---------------
+1. If DISCOVERY shows a **debit / non-credit** card  
+   (Immediate-only *or* BRAND 08 Maestro) we now **abort** the flow:
+      • Show prompt  “זיהוי כרטיס נכשל”  
+      • Send CANCEL to the P400  
+      • Skip the ‘Credit Terms’ dialog completely.
 
-הלוגיקה העסקית וה-FSM (PING → STATUS → START_TRAN → DISCOVERY →
-AUTHORIZE → FINISH_TRAN + התאוששות אוטומטית) נשארו זהות לגרסה הקודמת.
+2. If DISCOVERY itself returns  RESULT_CODE ≠ 0  
+   the same prompt is shown and the payment is abandoned.
+
+Everything else (PING → STATUS → START_TRAN → … etc.) is unchanged from v4.2.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ class QuickSaleMixin:
     # Public entry
     # ------------------------------------------------------------------
     def quick_sale(self, amount: float, tran_type: str = "01"):
+        """Add a Quick-Sale request to the queue."""
         self.qs_queue.append((amount, tran_type))
         self._start_next_qs()
 
@@ -61,7 +63,7 @@ class QuickSaleMixin:
         self._current_amount = amount
         self.qs_amount.setValue(amount)
 
-        # Discovery defaults (אין ENTRY_MODE!)
+        # —— Discovery defaults (NO <ENTRY_MODE>) ———————————
         self.qs_defaults = {
             "timeout":        "60",
             "restrict_token": "0",
@@ -98,7 +100,7 @@ class QuickSaleMixin:
         self._send(ping)
 
     # ------------------------------------------------------------------
-    # Send wrappers
+    # Send helpers
     # ------------------------------------------------------------------
     def _send_status(self):
         self._qs_phase = "STATUS"
@@ -120,6 +122,7 @@ class QuickSaleMixin:
         self._send(xml)
 
     def _qs_done(self):
+        """Mark current Quick-Sale finished and launch next, if any."""
         self.qs_active = False
         self._qs_phase = ""
         self._start_next_qs()
@@ -135,9 +138,7 @@ class QuickSaleMixin:
     # Body builders
     # ------------------------------------------------------------------
     def _disc_body(self, o: Dict) -> str:
-        """
-        Build <DISCOVERY> body – ללא ENTRY_MODE!
-        """
+        """Build the DISCOVERY body (without ENTRY_MODE)."""
         parts: List[str] = [
             f"<TIMEOUT>{o['timeout']}</TIMEOUT>",
             "<TRANSACTION_DETAILS>",
@@ -169,9 +170,7 @@ class QuickSaleMixin:
 
     def _auth_body(self, base: Dict, ct: str,
                    pay: int, first: float, nxt: float) -> str:
-        """
-        Build body for AUTHORIZE – inherits from _disc_body.
-        """
+        """Extend DISCOVERY body for AUTHORIZE."""
         body = self._disc_body(base)
         patch = f"<CREDIT_TERMS>{ct}</CREDIT_TERMS>"
         if pay:
@@ -187,30 +186,33 @@ class QuickSaleMixin:
     # DISCOVERY → AUTHORIZE helper
     # ------------------------------------------------------------------
     def _handle_discovery_ok(self, recv: str):
-        # TRANS_ID לשימוש מאוחר יותר
+        """Process a successful DISCOVERY response."""
+        # Save TRANS_ID in case recovery is needed
         self._trans_id = re.search(r"<TRANS_ID>([^<]+)</TRANS_ID>", recv).group(1)
 
-        # דגלים מה-DISCOVERY
+        # Which credit terms are allowed?
         flags = {k: bool(re.search(fr"<TERMS_{k.upper()}>1</TERMS_{k.upper()}>", recv))
                  for k in ("regular", "special", "immediate", "credit", "installments")}
 
-        # זיהוי כרטיס דביט – Immediate בלבד *או* Maestro (BRAND 08)
+        # Debit detection: Immediate-only OR Maestro BRAND 08
         is_debit = (
             (flags.get("immediate") and not any(flags[x] for x in ("regular", "special", "credit", "installments")))
             or bool(re.search(r"<BRAND>\s*08\s*</BRAND>", recv))
         )
         if is_debit:
-            flags = {"immediate": True}
+            # Abort – prompt + CANCEL
+            show_prompt("זיהוי כרטיס נכשל", 4000)
+            self._send_cancel()
+            return
 
-        # קריאת מגבלות min/max מה-XML
-        def _int(tag, d):
+        # ——— credit-capable flow ——————————————
+        def _int(tag, default):
             m = re.search(fr"<{tag}>(\d+)", recv)
-            return int(m.group(1)) if m else d
+            return int(m.group(1)) if m else default
 
         mn = max(2, _int("CREDIT_MIN_PAYMENTS", 2))
         mx = max(2, _int("CREDIT_MAX_PAYMENTS", 36))
 
-        # דיאלוג בחירת תנאים
         dlg = CreditTermDlg(flags, mn, mx, self._current_amount, None)
         if dlg.exec_() != QDialog.Accepted:
             show_prompt("העסקה לא אושרה", 4000)
@@ -222,7 +224,7 @@ class QuickSaleMixin:
         xml  = env_xml("PAYMENT", "AUTHORIZE", self.session,
                        bool(int(self.train_combo.currentText())), self.mac_key, body)
         self._qs_phase = "AUTHORIZE"
-        show_prompt("נא המתן לאישור עסקה")         # stays until replaced
+        show_prompt("נא המתן לאישור עסקה")
         self._send(xml)
 
     # ------------------------------------------------------------------
@@ -274,9 +276,7 @@ class QuickSaleMixin:
     # CENTRAL RESPONSE HANDLER
     # ═══════════════════════════════════════
     def _handle_response(self, sent: str, recv: str):
-        """
-        Central handler for *all* replies – FSM + house-keeping.
-        """
+        """Top-level FSM dispatcher."""
         self.sent_log.append(sent)
         self.recv_log.append(recv)
 
@@ -303,7 +303,7 @@ class QuickSaleMixin:
             # ---------- STATUS ----------
             if "<COMMAND>STATUS" in sent:
                 if "<RESULT_CODE>0<" in recv:
-                    # SHVA terminal-ID check
+                    # SHVA terminal-ID validation
                     expected = self.termid_field.text().strip()
                     m_tid = re.search(r"<SHVA_TERM_ID>(\d+)</SHVA_TERM_ID>", recv)
                     if expected and m_tid and m_tid.group(1) != expected:
@@ -340,7 +340,8 @@ class QuickSaleMixin:
                 if "<RESULT_CODE>0<" in recv:
                     self._handle_discovery_ok(recv)
                 else:
-                    show_prompt("העסקה לא אושרה", 4000)
+                    # Failure → prompt & abort
+                    show_prompt("זיהוי כרטיס נכשל", 4000)
                     self._qs_done()
                 return
 
@@ -358,7 +359,7 @@ class QuickSaleMixin:
                     else:
                         msg = "סיום עסקה\nהעסקה נכשלה"
                         if issuer_decline:
-                            msg += "\nנדחה עי חברה"
+                            msg += "\nנדחה ע\"י חברה"
                     show_prompt(msg, 4000)
 
                     save_receipt(recv)
@@ -379,7 +380,7 @@ class QuickSaleMixin:
             if "<COMMAND>GET_TRAN_DETAILS" in sent:
                 approved = ("<RESULT_CODE>0<" in recv and
                             "<TRANSACTIONS>" in recv and
-                            not "<TRANSACTIONS></TRANSACTIONS>" in recv)
+                            "<TRANSACTIONS></TRANSACTIONS>" not in recv)
                 if approved:
                     self._info("Recovery", "עסקה קיימת ואושרה – שולח VOID")
                     self._send_void()
