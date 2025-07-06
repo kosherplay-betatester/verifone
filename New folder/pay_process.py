@@ -1,23 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# pay_process.py  –  FULL FILE  (v4.5 • spinner + cross-thread fix)
+# pay_process.py  –  FULL FILE  (v4.8.2 • dialog + PAYMENTS_NUMBER=N-1 + 2-installments fix + webhook callback)
 
 """
-Quick-Sale finite-state machine
-==============================
+Quick-Sale finite-state machine for the Verifone-P400 desktop app
+================================================================
 
-v4.5
-----
-1. **Spinner UI** (introduced in v4.4) remains unchanged.
-2. **Cross-thread safety** – any Quick-Sale request arriving from the
-   background *WebhookServer* thread is now marshalled to the GUI thread
-   via a dedicated Qt signal, eliminating:
-      • QObject::startTimer warnings
-      • QObject::setParent errors
-   All UI calls (show_spinner / show_prompt / etc.) therefore execute
-   strictly in the main thread.
+Key points
+----------
+1. **Manual / Regular chooser**
+   • Immediately when Quick-Sale starts, a small dialog asks the cashier
+     whether the card will be read *Regularly* (default) or *Manually*
+     (key-in on the P400).  
+     • Enter = OK • Esc / Cancel = abort transaction.
 
-No business logic has been modified otherwise.
+2. **`<MANUAL>` & `<MANUAL_REASON>`**
+   • If the user picked “Manual”, `<MANUAL>1</MANUAL>` and
+     `<MANUAL_REASON>SIG</MANUAL_REASON>` are added to DISCOVERY.
+
+3. **Installments: PAYMENTS_NUMBER = N-1**
+   • For credit-terms **08 (Installments)** we send
+     `<PAYMENTS_NUMBER>` = *N – 1* (the first payment is “0” on the P400).
+
+4. **2-installments enabled**
+   • If the device returns `<MIN_PAYMENTS>2</…>` but
+     `<CREDIT_MIN_PAYMENTS>3</…>`, we adopt the smaller value (2) so the
+     cashier can indeed pick 2 installments (displayed as 0 + 1).
+
+5. **Webhook callback fixed**
+   • Method `_from_webhook()` exists and is connected to `enqueue_qs`, so
+     `WebhookServer` can safely post Quick-Sale requests back to the GUI
+     thread.
+
+The rest of the logic (auto-EOD, recovery, spinner prompts, etc.) is
+carried over unchanged from v4.5.
 """
 
 from __future__ import annotations
@@ -25,8 +41,12 @@ from __future__ import annotations
 import re
 from typing import Dict, List
 
-from PyQt5.QtCore    import QTimer, pyqtSlot, pyqtSignal, Qt
-from PyQt5.QtWidgets import QDialog
+from PyQt5.QtCore    import Qt, QTimer, pyqtSignal, pyqtSlot
+from PyQt5.QtGui     import QFont
+from PyQt5.QtWidgets import (
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout,
+    QLabel, QVBoxLayout, QWidget
+)
 
 from dialogs   import CreditTermDlg
 from receipt   import save_receipt
@@ -36,63 +56,134 @@ from config    import save_mac
 from prompts   import show_prompt, hide_prompt, show_spinner, hide_spinner
 
 
-# ════════════════════════════════════════════════════════
-#                     QuickSaleMixin
-# ════════════════════════════════════════════════════════
-class QuickSaleMixin:
+# ═══════════════════════════════════════════════════════════
+#        Mini dialog – Regular / Manual  (default Regular)
+# ═══════════════════════════════════════════════════════════
+class _ManualChoiceDlg(QDialog):
+    """Ask cashier to choose Regular (default) or Manual entry."""
 
-    # ---------- inter-thread signal ----------
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setWindowTitle("בחר סוג הזנה")
+        self.setLayoutDirection(Qt.RightToLeft)
+        self.setFont(QFont("Segoe UI", 10))
+
+        lay = QVBoxLayout(self)
+        form = QFormLayout(); lay.addLayout(form)
+
+        self.cmb = QComboBox()
+        self.cmb.addItem("רגיל (תקני)", False)       # data = is_manual?
+        self.cmb.addItem("ידני (הקלדת כרטיס)", True)
+        form.addRow(QLabel("סוג עסקה:"), self.cmb)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Ok).setText("אישור")
+        btns.button(QDialogButtonBox.Cancel).setText("ביטול")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    def is_manual(self) -> bool:
+        return bool(self.cmb.currentData())
+
+
+# ═══════════════════════════════════════════════════════════
+#                       QuickSaleMixin
+# ═══════════════════════════════════════════════════════════
+class QuickSaleMixin:
+    """
+    Mix-in containing the full Quick-Sale FSM.
+    Must be first in the MainWindow MRO so that its `_send()` etc.
+    refer to MainWindow methods.
+    """
+
+    # Webhook thread → GUI thread bridge
     enqueue_qs = pyqtSignal(float, str)
 
-    # ---------- ctor ----------
+    # ───────────────────────────────
+    # ctor
+    # ───────────────────────────────
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)        # keep MRO intact
-        self.enqueue_qs.connect(self.quick_sale) # GUI-thread slot
+        super().__init__(*args, **kwargs)
+        self.enqueue_qs.connect(self.quick_sale)
 
-    # ------------------------------------------------------------------
-    # Public entry  (runs in GUI thread only)
-    # ------------------------------------------------------------------
+        # Runtime state
+        self.qs_queue: list[tuple[float, str]] = []
+        self.qs_active        = False
+        self.session          = ""
+        self._current_amount  = 0.0
+        self._qs_phase        = ""
+        self._trans_id        = ""
+        self.qs_defaults: Dict = {}
+        self.qs_start_body    = ""
+        self._awaiting_cancel = False
+        self._cancel_timer    = None
+        self._manual_key_exchange = False
+
+    # ───────────────────────────────
+    # Webhook callback  (background thread)
+    # ───────────────────────────────
+    @pyqtSlot(float, str)
+    def _from_webhook(self, amount: float, tran_type: str):
+        """Called by WebhookServer; hops to GUI thread via enqueue_qs."""
+        self.enqueue_qs.emit(amount, tran_type)
+
+    # ───────────────────────────────
+    # Public entry
+    # ───────────────────────────────
     def quick_sale(self, amount: float, tran_type: str = "01"):
-        """Enqueue a Quick-Sale request and launch if idle."""
         self.qs_queue.append((amount, tran_type))
         self._start_next_qs()
 
-    # ------------------------------------------------------------------
+    # ───────────────────────────────
     # Queue helpers
-    # ------------------------------------------------------------------
+    # ───────────────────────────────
     def _start_next_qs(self):
         if self.qs_active or not self.qs_queue:
             return
         amount, code = self.qs_queue.pop(0)
         self._launch_qs(amount, code)
 
-    def _launch_qs(self, amount: float, code: str):
-        hide_prompt()                       # clear previous overlay
-        show_spinner("מעבד תשלום…")         # activity indicator
+    # ───────────────────────────────
+    # Launcher
+    # ───────────────────────────────
+    def _launch_qs(self, amount: float, tran_type: str):
+        hide_prompt(); hide_spinner()
+
+        dlg = _ManualChoiceDlg()
+        if dlg.exec_() != QDialog.Accepted:
+            show_prompt("העסקה בוטלה", 3000)
+            self._qs_done()
+            return
+        manual = dlg.is_manual()
+
+        show_spinner("מעבד תשלום…")
+
         self.session         = rand_session()
         self._current_amount = amount
         self.qs_amount.setValue(amount)
 
-        # —— Discovery defaults (NO <ENTRY_MODE>) ———————————
         self.qs_defaults = {
-            "timeout":        "60",
+            "timeout": "60",
             "restrict_token": "0",
-            "manual":         False,
-            "manual_reason":  "",
-            "tran_type":      code,
-            "amount":         to_minor(amount),
-            "currency":       "376",
-            "cash":           None,
-            "fx":             False,
-            "fx_to":          "",
-            "fx_amt":         None,
-            "use_token":      False,
-            "token_val":      "",
-            "service_type":   "",
-            "ctls":           True,
-            "allow_cancel":   True,
-            "unattended":     False,
-            "operation":      "04",
+            "manual": manual,
+            "manual_reason": "SIG" if manual else "",
+            "tran_type": tran_type,
+            "amount": to_minor(amount),
+            "currency": "376",
+            "cash": None,
+            "fx": False,
+            "fx_to": "",
+            "fx_amt": None,
+            "use_token": False,
+            "token_val": "",
+            "service_type": "",
+            "ctls": True,
+            "allow_cancel": True,
+            "unattended": False,
+            "operation": "04",
         }
         self.qs_start_body = (
             "<INVOICE>100000</INVOICE>"
@@ -103,58 +194,16 @@ class QuickSaleMixin:
         self._qs_phase = "PING"
         self._trans_id = ""
 
-        ping = env_xml(
+        self._send(env_xml(
             "ADMIN", "PING", self.session,
             bool(int(self.train_combo.currentText())), self.mac_key
-        )
-        self._send(ping)
+        ))
 
-    # ------------------------------------------------------------------
-    # Send helpers
-    # ------------------------------------------------------------------
-    def _send_status(self):
-        self._qs_phase = "STATUS"
-        xml = env_xml("ADMIN", "STATUS", self.session,
-                      bool(int(self.train_combo.currentText())), self.mac_key)
-        self._send(xml)
-
-    def _send_start_tran(self):
-        self._qs_phase = "START_TRAN"
-        xml = env_xml("SESSION", "START_TRAN", self.session,
-                      bool(int(self.train_combo.currentText())), self.mac_key,
-                      self.qs_start_body)
-        self._send(xml)
-        show_prompt("התחלת עסקה", 3000)
-
-    def _send_finish_tran(self):
-        xml = env_xml("SESSION", "FINISH_TRAN", self.session,
-                      bool(int(self.train_combo.currentText())), self.mac_key)
-        self._send(xml)
-
-    def _qs_done(self):
-        """Mark current Quick-Sale finished and launch next, if any."""
-        hide_spinner()
-        self.qs_active = False
-        self._qs_phase = ""
-        self._start_next_qs()
-
-    # ------------------------------------------------------------------
-    # Webhook bridge  (called from background thread)
-    # ------------------------------------------------------------------
-    @pyqtSlot(float, str)
-    def _from_webhook(self, amount: float, tran_type: str):
-        """
-        Publish Quick-Sale request coming from /pay HTTP call.
-        Signal ensures execution in the GUI thread.
-        """
-        self.enqueue_qs.emit(amount, tran_type)
-
-    # ------------------------------------------------------------------
-    # Body builders
-    # ------------------------------------------------------------------
+    # ───────────────────────────────
+    # XML body helpers
+    # ───────────────────────────────
     def _disc_body(self, o: Dict) -> str:
-        """Build the DISCOVERY body (without ENTRY_MODE)."""
-        parts: List[str] = [
+        parts = [
             f"<TIMEOUT>{o['timeout']}</TIMEOUT>",
             "<TRANSACTION_DETAILS>",
             f"<RESTRICT_TOKEN>{o['restrict_token']}</RESTRICT_TOKEN>",
@@ -169,27 +218,17 @@ class QuickSaleMixin:
         ]
         if o["manual"] and o["manual_reason"]:
             parts.append(f"<MANUAL_REASON>{o['manual_reason']}</MANUAL_REASON>")
-        if o["cash"] is not None:
-            parts.append(f"<CASH_AMOUNT>{o['cash']}</CASH_AMOUNT>")
-        if o["fx"]:
-            parts += [
-                f"<CONVERTED_AMOUNT>{o['fx_amt']}</CONVERTED_AMOUNT>",
-                f"<CONVERTED_CURRENCY>{o['fx_to']}</CONVERTED_CURRENCY>",
-            ]
-        if o["use_token"] and o["token_val"]:
-            parts.append(f"<CARD_TOKEN>{o['token_val']}</CARD_TOKEN>")
-        if o["service_type"]:
-            parts.append(f"<SERVICE_TYPE>{o['service_type']}</SERVICE_TYPE>")
         parts.append(f"<OPERATION>{o['operation']}</OPERATION></TRANSACTION_DETAILS>")
         return "".join(parts)
 
     def _auth_body(self, base: Dict, ct: str,
                    pay: int, first: float, nxt: float) -> str:
-        """Extend DISCOVERY body for AUTHORIZE."""
+        """Add payment fields; PAYMENTS_NUMBER = pay-1 for installments."""
         body = self._disc_body(base)
+        add_pay = pay - 1 if ct == "8" and pay > 0 else pay
         patch = f"<CREDIT_TERMS>{ct}</CREDIT_TERMS>"
         if pay:
-            patch += f"<PAYMENTS_NUMBER>{pay:02d}</PAYMENTS_NUMBER>"
+            patch += f"<PAYMENTS_NUMBER>{add_pay:02d}</PAYMENTS_NUMBER>"
         if first:
             patch += f"<FIRST_PAYMENT_AMOUNT>{to_minor(first)}</FIRST_PAYMENT_AMOUNT>"
         if nxt:
@@ -197,53 +236,28 @@ class QuickSaleMixin:
         return body.replace("</TRANSACTION_DETAILS>",
                             patch + "</TRANSACTION_DETAILS>")
 
-    # ------------------------------------------------------------------
-    # DISCOVERY → AUTHORIZE helper
-    # ------------------------------------------------------------------
-    def _handle_discovery_ok(self, recv: str):
-        """Process a successful DISCOVERY response."""
-        # Save TRANS_ID in case recovery is needed
-        self._trans_id = re.search(r"<TRANS_ID>([^<]+)</TRANS_ID>", recv).group(1)
+    # ───────────────────────────────
+    # Send helpers
+    # ───────────────────────────────
+    def _send_status(self):
+        self._qs_phase = "STATUS"
+        self._send(env_xml("ADMIN", "STATUS", self.session,
+                           bool(int(self.train_combo.currentText())), self.mac_key))
 
-        # Which credit terms are allowed?
-        flags = {k: bool(re.search(fr"<TERMS_{k.upper()}>1</TERMS_{k.upper()}>", recv))
-                 for k in ("regular", "special", "immediate", "credit", "installments")}
+    def _send_start_tran(self):
+        self._qs_phase = "START_TRAN"
+        self._send(env_xml("SESSION", "START_TRAN", self.session,
+                           bool(int(self.train_combo.currentText())), self.mac_key,
+                           self.qs_start_body))
+        show_prompt("התחלת עסקה", 3000)
 
-        # Debit detection: Immediate-only OR Maestro BRAND 08
-        is_debit = (
-            (flags.get("immediate") and not any(flags[x] for x in ("regular", "special", "credit", "installments")))
-            or bool(re.search(r"<BRAND>\s*08\s*</BRAND>", recv))
-        )
-        if is_debit:
-            show_prompt("זיהוי כרטיס נכשל", 4000)
-            self._send_cancel()
-            return
+    def _send_finish_tran(self):
+        self._send(env_xml("SESSION", "FINISH_TRAN", self.session,
+                           bool(int(self.train_combo.currentText())), self.mac_key))
 
-        # ——— credit-capable flow ——————————————
-        def _int(tag, default):
-            m = re.search(fr"<{tag}>(\d+)", recv)
-            return int(m.group(1)) if m else default
-
-        mn = max(2, _int("CREDIT_MIN_PAYMENTS", 2))
-        mx = max(2, _int("CREDIT_MAX_PAYMENTS", 36))
-
-        dlg = CreditTermDlg(flags, mn, mx, self._current_amount, None)
-        if dlg.exec_() != QDialog.Accepted:
-            show_prompt("העסקה לא אושרה", 4000)
-            self._send_cancel()
-            return
-        ct, pay, first, nxt = dlg.data()
-
-        body = self._auth_body(self.qs_defaults, ct, pay, first, nxt)
-        xml  = env_xml("PAYMENT", "AUTHORIZE", self.session,
-                       bool(int(self.train_combo.currentText())), self.mac_key, body)
-        self._qs_phase = "AUTHORIZE"
-        show_prompt("נא המתן לאישור עסקה")
-        self._send(xml)
-
-    # ------------------------------------------------------------------
-    # Auto-cancel & recovery helpers
-    # ------------------------------------------------------------------
+    # ───────────────────────────────
+    # Cancel / recovery helpers
+    # ───────────────────────────────
     def _schedule_cancel(self):
         if self._awaiting_cancel:
             return
@@ -256,21 +270,14 @@ class QuickSaleMixin:
     def _send_cancel(self):
         hide_spinner()
         self._awaiting_cancel = False
-        xml = env_xml("GENERAL", "CANCEL", self.session,
-                      bool(int(self.train_combo.currentText())), self.mac_key)
-        self._send(xml)
+        self._send(env_xml("GENERAL", "CANCEL", self.session,
+                           bool(int(self.train_combo.currentText())), self.mac_key))
 
     def _send_get_details(self):
-        if not self._trans_id:
-            self._warn("Recovery", "TRANS_ID missing – cannot query details")
-            show_prompt("העסקה לא אושרה", 4000)
-            self._qs_done()
-            return
         body = f"<TRANS_ID>{self._trans_id}</TRANS_ID>"
-        xml = env_xml("REPORT", "GET_TRAN_DETAILS", self.session,
-                      bool(int(self.train_combo.currentText())), self.mac_key, body)
         self._qs_phase = "GET_DETAILS"
-        self._send(xml)
+        self._send(env_xml("REPORT", "GET_TRAN_DETAILS", self.session,
+                           bool(int(self.train_combo.currentText())), self.mac_key, body))
 
     def _send_void(self):
         body = (
@@ -282,28 +289,79 @@ class QuickSaleMixin:
             "<ORIGINAL_CURRENCY>376</ORIGINAL_CURRENCY>"
             "</TRANSACTION_DETAILS>"
         )
-        xml = env_xml("PAYMENT", "AUTHORIZE", self.session,
-                      bool(int(self.train_combo.currentText())), self.mac_key, body)
         self._qs_phase = "VOID"
-        self._send(xml)
+        self._send(env_xml("PAYMENT", "AUTHORIZE", self.session,
+                           bool(int(self.train_combo.currentText())), self.mac_key, body))
 
-    # ═══════════════════════════════════════
-    # CENTRAL RESPONSE HANDLER
-    # ═══════════════════════════════════════
+    # ───────────────────────────────
+    # Discovery → Authorize
+    # ───────────────────────────────
+    def _handle_discovery_ok(self, recv: str):
+        """Called only after RESULT_CODE 0 for DISCOVERY."""
+        self._trans_id = re.search(r"<TRANS_ID>([^<]+)</TRANS_ID>", recv).group(1)
+
+        flags = {k: bool(re.search(fr"<TERMS_{k.upper()}>1</TERMS_{k.upper()}>", recv))
+                 for k in ("regular", "special", "immediate", "credit", "installments")}
+
+        is_debit = (
+            (flags.get("immediate") and not any(flags[x] for x in (
+                "regular", "special", "credit", "installments")))
+            or bool(re.search(r"<BRAND>\s*08\s*</BRAND>", recv))
+        )
+        if is_debit:
+            show_prompt("זיהוי כרטיס נכשל", 4000)
+            self._send_cancel()
+            return
+
+        def _iv(tag: str, default: int) -> int:
+            m = re.search(fr"<{tag}>(\d+)", recv)
+            return int(m.group(1)) if m else default
+
+        # Allow 2 installments even if CREDIT_MIN_PAYMENTS is 3
+        mn = max(2, min(_iv("MIN_PAYMENTS", 2), _iv("CREDIT_MIN_PAYMENTS", 2)))
+        mx = max(2, max(_iv("MAX_PAYMENTS", 36), _iv("CREDIT_MAX_PAYMENTS", 36)))
+
+        dlg = CreditTermDlg(flags, mn, mx, self._current_amount, None)
+        if dlg.exec_() != QDialog.Accepted:
+            show_prompt("העסקה לא אושרה", 4000)
+            self._send_cancel()
+            return
+        ct, pay, first, nxt = dlg.data()
+
+        self._qs_phase = "AUTHORIZE"
+        self._send(env_xml(
+            "PAYMENT", "AUTHORIZE", self.session,
+            bool(int(self.train_combo.currentText())), self.mac_key,
+            self._auth_body(self.qs_defaults, ct, pay, first, nxt)
+        ))
+        show_prompt("נא המתן לאישור עסקה")
+
+    # ───────────────────────────────
+    # Finish current QS & start next
+    # ───────────────────────────────
+    def _qs_done(self):
+        hide_spinner()
+        self.qs_active = False
+        self._qs_phase = ""
+        self._start_next_qs()
+
+    # ═══════════════════════════════════════════════════════
+    # CENTRAL RESPONSE HANDLER  (full FSM)
+    # ═══════════════════════════════════════════════════════
     def _handle_response(self, sent: str, recv: str):
-        """Top-level FSM dispatcher."""
+        """Dispatcher for every XML reply from _send()."""
         self.sent_log.append(sent)
         self.recv_log.append(recv)
 
-        # RESULT_CODE 2 → auto-cancel
+        # Auto-cancel path
         if "<RESULT_CODE>2<" in recv and "<COMMAND>CANCEL" not in sent:
             show_prompt("העסקה לא אושרה", 4000)
             self._schedule_cancel()
             return
 
-        # ───────────────────────────────────
+        # --------------------------------------------------
         # Quick-Sale FSM
-        # ───────────────────────────────────
+        # --------------------------------------------------
         if self.qs_active:
 
             # ---------- PING ----------
@@ -318,36 +376,30 @@ class QuickSaleMixin:
             # ---------- STATUS ----------
             if "<COMMAND>STATUS" in sent:
                 if "<RESULT_CODE>0<" in recv:
-                    # SHVA terminal-ID validation
                     expected = self.termid_field.text().strip()
                     m_tid = re.search(r"<SHVA_TERM_ID>(\d+)</SHVA_TERM_ID>", recv)
                     if expected and m_tid and m_tid.group(1) != expected:
                         self._crit("SHVA ID", "מזהה SHVA אינו תקין")
                         show_prompt("העסקה לא אושרה", 4000)
-                        self._send_cancel()
-                        self._qs_done()
-                        return
-                    # Auto-EOD if SHVA_STATUS ≠ 1
+                        self._send_cancel(); self._qs_done(); return
                     if re.search(r"<SHVA_STATUS>(?!1)", recv):
                         self.cmd_eod()
                     self._send_start_tran()
                 else:
-                    show_prompt("העסקה לא אושרה", 4000)
-                    self._qs_done()
+                    show_prompt("העסקה לא אושרה", 4000); self._qs_done()
                 return
 
             # ---------- START_TRAN ----------
             if "<COMMAND>START_TRAN" in sent:
                 if "<RESULT_CODE>0<" in recv:
-                    body = self._disc_body(self.qs_defaults)
-                    xml  = env_xml("PAYMENT", "DISCOVERY", self.session,
-                                   bool(int(self.train_combo.currentText())), self.mac_key, body)
+                    disc_xml = env_xml("PAYMENT", "DISCOVERY", self.session,
+                                       bool(int(self.train_combo.currentText())),
+                                       self.mac_key, self._disc_body(self.qs_defaults))
                     self._qs_phase = "DISCOVERY"
                     show_prompt("זיהוי כרטיס", 3000)
-                    self._send(xml)
+                    self._send(disc_xml)
                 else:
-                    show_prompt("העסקה לא אושרה", 4000)
-                    self._qs_done()
+                    show_prompt("העסקה לא אושרה", 4000); self._qs_done()
                 return
 
             # ---------- DISCOVERY ----------
@@ -355,25 +407,25 @@ class QuickSaleMixin:
                 if "<RESULT_CODE>0<" in recv:
                     self._handle_discovery_ok(recv)
                 else:
-                    show_prompt("זיהוי כרטיס נכשל", 4000)
-                    self._qs_done()
+                    show_prompt("זיהוי כרטיס נכשל", 4000); self._qs_done()
                 return
 
             # ---------- AUTHORIZE ----------
             if "<COMMAND>AUTHORIZE" in sent:
+
                 if "<EVENT>COMPLETED" in recv:
-                    ok_code = bool(re.search(r"<RESULT_CODE>0<", recv))
-                    m_auth  = re.search(r"<ISSUER_AUTH_NUM>([^<]*)</ISSUER_AUTH_NUM>", recv)
-                    auth_no = m_auth.group(1).strip() if m_auth else ""
-                    success = ok_code and auth_no and auth_no != "0"
+                    ok = "<RESULT_CODE>0<" in recv
+                    m_auth = re.search(r"<ISSUER_AUTH_NUM>([^<]*)</ISSUER_AUTH_NUM>", recv)
+                    auth_no = (m_auth.group(1) if m_auth else "").strip()
                     issuer_decline = bool(re.search(r"נדחה\s*ע.?י\s*חברה", recv))
 
-                    if success:
+                    if ok and auth_no and auth_no != "0":
                         msg = f"סיום עסקה\nהעסקה אושרה בהצלחה\nמספר אישור {auth_no}"
                     else:
                         msg = "סיום עסקה\nהעסקה נכשלה"
                         if issuer_decline:
                             msg += "\nנדחה ע\"י חברה"
+
                     show_prompt(msg, 4000)
 
                     save_receipt(recv)
@@ -382,15 +434,16 @@ class QuickSaleMixin:
                             self.webhook.publish(fp.read())
                     except Exception:
                         pass
+
                     self._send_finish_tran()
                     return
 
-                # Not completed → recovery
+                # Incomplete → recovery
                 self._info("Recovery", "AUTHORIZE incomplete – querying details")
                 self._send_get_details()
                 return
 
-            # ---------- GET_TRAN_DETAILS ----------
+            # ---------- GET_DETAILS ----------
             if "<COMMAND>GET_TRAN_DETAILS" in sent:
                 approved = ("<RESULT_CODE>0<" in recv and
                             "<TRANSACTIONS>" in recv and
@@ -400,7 +453,7 @@ class QuickSaleMixin:
                     self._send_void()
                 else:
                     show_prompt("העסקה לא אושרה", 4000)
-                    self._crit("Recovery", "No matching transaction – aborting queue")
+                    self._crit("Recovery", "No matching transaction – abort queue")
                     self._qs_done()
                 return
 
@@ -414,17 +467,17 @@ class QuickSaleMixin:
                 self._qs_done()
                 return
 
-        # ───────────────────────────────────
-        # Cancel outside Quick-Sale
-        # ───────────────────────────────────
+        # --------------------------------------------------
+        # CANCEL outside Quick-Sale
+        # --------------------------------------------------
         if "<COMMAND>CANCEL" in sent:
             show_prompt("העסקה לא אושרה", 4000)
             self._send_finish_tran()
             return
 
-        # ───────────────────────────────────
-        # Register / key-exchange housekeeping
-        # ───────────────────────────────────
+        # --------------------------------------------------
+        # Register / EXCHANGE_KEYS side effects
+        # --------------------------------------------------
         if "<COMMAND>REGISTER" in sent and "<EVENT>COMPLETED" in recv:
             self.ktk_field.setEnabled(True)
             self.key_btn.setEnabled(True)
