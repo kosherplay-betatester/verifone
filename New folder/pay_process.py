@@ -1,39 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# pay_process.py  –  FULL FILE  (v4.8.2 • dialog + PAYMENTS_NUMBER=N-1 + 2-installments fix + webhook callback)
+# pay_process.py  –  FULL FILE  (v4.9 • SHVA-ID mismatch prompt)
 
 """
 Quick-Sale finite-state machine for the Verifone-P400 desktop app
 ================================================================
 
-Key points
-----------
-1. **Manual / Regular chooser**
-   • Immediately when Quick-Sale starts, a small dialog asks the cashier
-     whether the card will be read *Regularly* (default) or *Manually*
-     (key-in on the P400).  
-     • Enter = OK • Esc / Cancel = abort transaction.
+What’s new in v4.9
+------------------
+• Global check for **SHVA_TERM_ID** mismatch:
+  – Every response is scanned for `<SHVA_TERM_ID>…</SHVA_TERM_ID>`.
+  – If the value differs from the one stored in *settings*, a Hebrew
+    prompt is shown immediately:
 
-2. **`<MANUAL>` & `<MANUAL_REASON>`**
-   • If the user picked “Manual”, `<MANUAL>1</MANUAL>` and
-     `<MANUAL_REASON>SIG</MANUAL_REASON>` are added to DISCOVERY.
+        מספר SHVA אינו תקין אנא פנה לתמיכה
 
-3. **Installments: PAYMENTS_NUMBER = N-1**
-   • For credit-terms **08 (Installments)** we send
-     `<PAYMENTS_NUMBER>` = *N – 1* (the first payment is “0” on the P400).
+  – The mismatch is logged as a critical error.
+  – If a Quick-Sale is in progress, it is cancelled automatically.
 
-4. **2-installments enabled**
-   • If the device returns `<MIN_PAYMENTS>2</…>` but
-     `<CREDIT_MIN_PAYMENTS>3</…>`, we adopt the smaller value (2) so the
-     cashier can indeed pick 2 installments (displayed as 0 + 1).
-
-5. **Webhook callback fixed**
-   • Method `_from_webhook()` exists and is connected to `enqueue_qs`, so
-     `WebhookServer` can safely post Quick-Sale requests back to the GUI
-     thread.
-
-The rest of the logic (auto-EOD, recovery, spinner prompts, etc.) is
-carried over unchanged from v4.5.
+No other behaviour is changed (installment fix, webhook callback, etc.).
 """
 
 from __future__ import annotations
@@ -353,6 +338,22 @@ class QuickSaleMixin:
         self.sent_log.append(sent)
         self.recv_log.append(recv)
 
+        # ───────────────────────────────────────────────
+        # SHVA-TERM-ID mismatch  (runs for every reply)
+        # ───────────────────────────────────────────────
+        expected_tid = self.termid_field.text().strip() if hasattr(self, 'termid_field') else ""
+        if expected_tid:
+            m_tid = re.search(r"<SHVA_TERM_ID>(\d+)</SHVA_TERM_ID>", recv)
+            if m_tid and m_tid.group(1) != expected_tid:
+                self._crit("SHVA ID", "מספר SHVA אינו תקין אנא פנה לתמיכה")
+                show_prompt("מספר SHVA אינו תקין אנא פנה לתמיכה", 4000)
+
+                # Abort Quick-Sale if active
+                if self.qs_active:
+                    self._send_cancel()
+                    self._qs_done()
+                return  # stop further processing for this response
+
         # Auto-cancel path
         if "<RESULT_CODE>2<" in recv and "<COMMAND>CANCEL" not in sent:
             show_prompt("העסקה לא אושרה", 4000)
@@ -376,12 +377,7 @@ class QuickSaleMixin:
             # ---------- STATUS ----------
             if "<COMMAND>STATUS" in sent:
                 if "<RESULT_CODE>0<" in recv:
-                    expected = self.termid_field.text().strip()
-                    m_tid = re.search(r"<SHVA_TERM_ID>(\d+)</SHVA_TERM_ID>", recv)
-                    if expected and m_tid and m_tid.group(1) != expected:
-                        self._crit("SHVA ID", "מזהה SHVA אינו תקין")
-                        show_prompt("העסקה לא אושרה", 4000)
-                        self._send_cancel(); self._qs_done(); return
+                    # SHVA-ID already validated globally
                     if re.search(r"<SHVA_STATUS>(?!1)", recv):
                         self.cmd_eod()
                     self._send_start_tran()
