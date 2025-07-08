@@ -1,0 +1,86 @@
+{
+  "timestamp": "2025-07-08 14:08:15",
+  "amount": 0.01,
+  "currency": "",
+  "result": "הצלחה",
+  "card": {
+    "masked_pan": "531084******9139",
+    "brand": "01",
+    "issuer": "01",
+    "expiry": "0531"
+  },
+  "transaction": {
+    "type": "01",
+    "auth_num": "2001902",
+    "trans_id": "X98FMNZ-0002568",
+    "rrn": "515914001902"
+  },
+  "items": [
+    {
+      "terminal_name": "EMV WS Tווריפון"
+    },
+    {
+      "terminal_id": "0883662"
+    },
+    {
+      "app_version": "3_7_6_0000"
+    },
+    {
+      "ACQUIRER_ID": "71506"
+    },
+    {
+      "timestamp_local": "08/06/25 14:08"
+    },
+    {
+      "transaction_type": "עסקת חיוב"
+    },
+    {
+      "amount_text": "0.01"
+    },
+    {
+      "currency_text": "ש\"ח"
+    },
+    {
+      "entry_mode": "Contactless EMV"
+    },
+    {
+      "ISSUER_AUTH_NUMBER": "2001902"
+    },
+    {
+      "authorizer": "חברה"
+    },
+    {
+      "uid": "25060814082508836627417"
+    },
+    {
+      "RRN": "515914001902"
+    },
+    {
+      "voucher_number": "56074021"
+    },
+    {
+      "card_name": "Mastercard"
+    },
+    {
+      "masked_pan_tail": "9139"
+    },
+    {
+      "credit_terms": "רגיל"
+    },
+    {
+      "chip_app_id": "A0000000041010"
+    },
+    {
+      "atc": "0107"
+    },
+    {
+      "TSI": "E800"
+    },
+    {
+      "TVR": "0000001001"
+    },
+    {
+      "ashrait_version": "4.17.0"
+    }
+  ]
+}
