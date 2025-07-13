@@ -1,28 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# network.py  –  FULL FILE  (v1.64 • start/end timestamps)
+# network.py  –  FULL FILE  (v1.65 • FINISH_TRAN classified as quick)
 
 """
 Networking helpers for the Verifone-P400 desktop app
 ====================================================
 
-Changes in v1.64
+Changes in v1.65
 ----------------
-• `SockThread` now captures precise start/end `datetime` objects for every
-  request/response exchange and forwards them to `logger.log_traffic()`.
-• No other behaviour is altered.
+• **FINISH_TRAN is now treated as a quick command**  
+  − Moved from *RECEIPT_CMDS* to *QUICK_CMDS* so the reader waits a
+    maximum of **4 s** instead of 15 s.  
+  − This eliminates the long pause before the webhook can start the
+    next transaction once a receipt is printed.
 
-Command classes
----------------
-* QUICK_CMDS   = {"PING", "STATUS", "START_TRAN"}
-    – Stop reading when `<EVENT>COMPLETED>`
-    – chunk_timeout = 0.4 s   max_wait = 4 s
+Timing rules
+------------
 
-* USER_CMDS    = {"DISCOVERY", "CARD_DATA", "SIGNATURE_CAPTURE"}
-    – Wait up to 65 s for user action
+| Group          | Commands                               | chunk_timeout | max_wait |
+|----------------|----------------------------------------|---------------|----------|
+| QUICK_CMDS     | PING STATUS START_TRAN **FINISH_TRAN** | 0.4 s         | 4 s      |
+| USER_CMDS      | DISCOVERY CARD_DATA SIGNATURE_CAPTURE  | 3 s           | 65 s     |
+| RECEIPT_CMDS   | AUTHORIZE REFUND                       | 1.2 s         | 15 s     |
 
-* RECEIPT_CMDS = {"AUTHORIZE", "FINISH_TRAN", "REFUND"}
-    – Wait for `</TRANSACTION>` (full receipt), 15 s max
+Every other command falls back to **chunk_timeout = 1 s** and
+**max_wait = 10 s**.
 """
 
 from __future__ import annotations
@@ -58,9 +60,10 @@ class SockThread(QThread):
     # (sent_xml, received_text) will be delivered back to the GUI
     result = pyqtSignal(str, str)
 
-    QUICK_CMDS   = {"PING", "STATUS", "START_TRAN"}
+    # FINISH_TRAN re-classified as “quick”
+    QUICK_CMDS   = {"PING", "STATUS", "START_TRAN", "FINISH_TRAN"}
     USER_CMDS    = {"DISCOVERY", "CARD_DATA", "SIGNATURE_CAPTURE"}
-    RECEIPT_CMDS = {"AUTHORIZE", "FINISH_TRAN", "REFUND"}
+    RECEIPT_CMDS = {"AUTHORIZE", "REFUND"}
 
     # ---------- internal helpers ----------
     def _is_done(self, buf: bytes, cmd: str) -> bool:
@@ -113,7 +116,7 @@ class SockThread(QThread):
         recv_txt  = recv_buf.decode("utf-8", "replace")
         end_time  = datetime.now()          # —— END timestamp
 
-        # NEW: forward timestamps to logger
+        # Log traffic with timestamps
         log_traffic(sent, recv_txt, start_time, end_time)
 
         # Emit to GUI
@@ -154,6 +157,7 @@ class WebhookServer(Thread):
         outer = self
 
         class H(BaseHTTPRequestHandler):
+
             # ――― helpers ―――
             def _plain(self, st, body=b""):
                 self.send_response(st)

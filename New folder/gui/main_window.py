@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# gui/main_window.py  –  FULL FILE  (v2.1 • all-black logs)
+# gui/main_window.py  –  FULL FILE  (v2.2 • auto-EOD removed)
 
 """
 Main admin window for Verifone-P400 desktop app
 ==============================================
 
-Changes in v2.1
+Changes in v2.2
 ---------------
-• All log messages (INFO / WARN / ERROR) are now forced to black text
-  so the two panes show a single, consistent colour.
+• **Removed** the automatic EOD scheduler and its time-picker.
+  EOD can now be triggered only manually via the “EOD” button.
 
-Earlier changes in v2.0
------------------------
-• Payment logic moved to *pay_process.py* (`QuickSaleMixin`).
-• Added Hebrew on-screen prompts via `prompts.show_prompt()`.
+Earlier v2.1
+------------
+• Forced all log text to black so both panes show a single, consistent colour.
 """
 
 from __future__ import annotations
@@ -24,34 +23,33 @@ import sys
 from datetime import datetime
 from typing import Final
 
-from PyQt5.QtCore    import Qt, QTimer, QTime, QDateTime
+from PyQt5.QtCore    import Qt
 from PyQt5.QtGui     import QTextCursor, QTextCharFormat, QColor
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QComboBox,
     QPushButton, QTextEdit, QVBoxLayout, QHBoxLayout, QSplitter,
-    QDoubleSpinBox, QTimeEdit
+    QDoubleSpinBox
 )
 
 # Project-local helpers
 from config   import load_settings, load_mac, save_settings, save_mac
-from logger   import log_traffic
 from network  import SockThread, WebhookServer
 from utils    import rand_session, des3_decrypt
 from xml_sign import env_xml, sign_xml, template_xml
-from pay_process import QuickSaleMixin            # ⬅ FSM lives here
+from pay_process import QuickSaleMixin            # ⬅ payment FSM lives here
 
 
 # ════════════════════════════════════════════════════════════════════
 #                           MainWindow
 # ════════════════════════════════════════════════════════════════════
-class MainWindow(QuickSaleMixin, QMainWindow):  # mixin *first* in MRO
+class MainWindow(QuickSaleMixin, QMainWindow):       # mixin *first* in MRO
     """Admin GUI (everything except the payment FSM)."""
 
     # ───────────────────────────────────────────────────────
     # Construction
     # ───────────────────────────────────────────────────────
     def __init__(self):
-        super().__init__()                      # QMainWindow ctor
+        super().__init__()                           # QMainWindow ctor
 
         self.setWindowTitle("Verifone P400 – Quick Sale / Webhook / Admin")
         self.resize(1120, 860)
@@ -76,7 +74,7 @@ class MainWindow(QuickSaleMixin, QMainWindow):  # mixin *first* in MRO
         cfg = load_settings()
 
         # ═════════════════════ UI ═════════════════════
-        root_widget = QWidget(); layout = QVBoxLayout(root_widget)
+        root = QWidget(); layout = QVBoxLayout(root)
 
         # ―― connection ――
         row = QHBoxLayout()
@@ -127,7 +125,7 @@ class MainWindow(QuickSaleMixin, QMainWindow):  # mixin *first* in MRO
         row.addWidget(QLabel("MAC Key")); row.addWidget(self.mac_view)
         layout.addLayout(row)
 
-        # ―― quick-sale row (button triggers mixin) ――
+        # ―― quick-sale row ――
         row = QHBoxLayout()
         row.addWidget(QLabel("Amount ₪"))
         self.qs_amount = QDoubleSpinBox(decimals=2, maximum=999999,
@@ -151,18 +149,6 @@ class MainWindow(QuickSaleMixin, QMainWindow):  # mixin *first* in MRO
         self.eod_btn = QPushButton("EOD"); self.eod_btn.setEnabled(bool(self.mac_key))
         self.eod_btn.clicked.connect(self.cmd_eod); row.addWidget(self.eod_btn)
         layout.addLayout(row)
-
-        # ―― auto-EOD time ――
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Auto EOD at"))
-        self.eod_time_edit = QTimeEdit(); self.eod_time_edit.setDisplayFormat("HH:mm")
-        self.eod_time_edit.setTime(QTime(2, 0))
-        row.addWidget(self.eod_time_edit)
-        layout.addLayout(row)
-        self._eod_timer = QTimer(self); self._eod_timer.setSingleShot(True)
-        self._eod_timer.timeout.connect(self._handle_auto_eod)
-        self.eod_time_edit.timeChanged.connect(self._schedule_auto_eod)
-        self._schedule_auto_eod(self.eod_time_edit.time())
 
         # ―― logs ――
         self.sent_log = QTextEdit(readOnly=True)
@@ -202,12 +188,12 @@ class MainWindow(QuickSaleMixin, QMainWindow):  # mixin *first* in MRO
         box.addLayout(bar)
         layout.addLayout(box, stretch=2)
 
-        self.setCentralWidget(root_widget)
+        self.setCentralWidget(root)
 
         # ---------- Webhook server ----------
         host = cfg.get("webhook_host", "localhost") or "localhost"
         port = int(cfg.get("webhook_port", 8080))
-        self.webhook = WebhookServer(host, port, self._from_webhook)  # _from_webhook in mixin
+        self.webhook = WebhookServer(host, port, self._from_webhook)   # _from_webhook in mixin
         self.webhook.start()
 
     # ══════════════════════════════════════════════════════
@@ -236,7 +222,7 @@ class MainWindow(QuickSaleMixin, QMainWindow):  # mixin *first* in MRO
             self._crit("Settings", f"Save failed: {exc}")
 
     # ══════════════════════════════════════════════════════
-    # Convenience log helpers  (all-black text)
+    # Convenience log helpers (black text)
     # ══════════════════════════════════════════════════════
     def _info(self, title: str, text: str):
         self.sent_log.append(
@@ -254,7 +240,7 @@ class MainWindow(QuickSaleMixin, QMainWindow):  # mixin *first* in MRO
         self.recv_log.moveCursor(QTextCursor.End)
 
     # ══════════════════════════════════════════════════════
-    # Admin commands (Register / Keys / Status / EOD / generic)
+    # Admin commands
     # ══════════════════════════════════════════════════════
     def cmd_register(self):
         self.session = rand_session()
@@ -296,20 +282,6 @@ class MainWindow(QuickSaleMixin, QMainWindow):  # mixin *first* in MRO
         self._send(xml)
 
     # ══════════════════════════════════════════════════════
-    # Auto-EOD scheduler
-    # ══════════════════════════════════════════════════════
-    def _schedule_auto_eod(self, tm: QTime):
-        now = QDateTime.currentDateTime()
-        target = QDateTime(now.date(), tm)
-        if target <= now:
-            target = target.addDays(1)
-        self._eod_timer.start(now.msecsTo(target))
-
-    def _handle_auto_eod(self):
-        self.cmd_eod()
-        self._eod_timer.start(24 * 60 * 60 * 1000)
-
-    # ══════════════════════════════════════════════════════
     # TCP-send helper
     # ══════════════════════════════════════════════════════
     def _send(self, xml: str):
@@ -318,7 +290,7 @@ class MainWindow(QuickSaleMixin, QMainWindow):  # mixin *first* in MRO
         except ValueError:
             return self._crit("Port", "Invalid port")
         thr = SockThread(self.ip_field.text().strip(), port, xml)
-        thr.result.connect(self._handle_response)  # handler in mixin
+        thr.result.connect(self._handle_response)      # handler in mixin
         thr.finished.connect(lambda: self.threads.remove(thr))
         self.threads.append(thr)
         thr.start()

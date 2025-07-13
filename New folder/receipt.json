@@ -1,6 +1,6 @@
 {
-  "timestamp": "2025-07-06 12:13:01",
-  "amount": 1.01,
+  "timestamp": "2025-07-13 12:08:48",
+  "amount": 1.12,
   "currency": "",
   "result": "הצלחה",
   "card": {
@@ -11,29 +11,29 @@
   },
   "transaction": {
     "type": "01",
-    "auth_num": "2105325",
-    "trans_id": "X98FMNZ-0003320",
-    "rrn": "518712105325"
+    "auth_num": "2128485",
+    "trans_id": "X98FMNZ-0003690",
+    "rrn": "519412128485"
   },
   "items": {
     "terminal_name": "EMV WS Tווריפון",
     "terminal_id": "0883662",
     "app_version": "3_7_6_0000",
     "ACQUIRER_ID": "71506",
-    "timestamp_local": "06/07/25 12:12",
+    "timestamp_local": "13/07/25 12:08",
     "transaction_type": "עסקת חיוב",
-    "amount_text": "1.01",
+    "amount_text": "1.12",
     "currency_text": "ש\"ח",
-    "issuer_auth_num": "2105325",
+    "issuer_auth_num": "2128485",
     "authorizer": "חברה",
-    "uid": "25070612123308836621474",
-    "RRN": "518712105325",
-    "voucher_number": "71074029",
+    "uid": "25071312083008836628477",
+    "RRN": "519412128485",
+    "voucher_number": "78074043",
     "card_name": "Mastercard",
     "masked_pan_tail": "9139",
     "credit_terms": "רגיל",
     "chip_app_id": "A0000000041010",
-    "atc": "0173",
+    "atc": "0189",
     "TSI": "E800",
     "TVR": "0000001001",
     "ashrait_version": "4.17.0"
