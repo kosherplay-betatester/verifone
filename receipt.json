@@ -1,0 +1,19 @@
+{
+  "timestamp": "2025-07-15 13:09:16",
+  "amount": 0.0,
+  "currency": "",
+  "result": "פעולת הביטול נכשלה",
+  "card": {
+    "masked_pan": "",
+    "brand": "",
+    "issuer": "",
+    "expiry": ""
+  },
+  "transaction": {
+    "type": "",
+    "auth_num": "",
+    "trans_id": "",
+    "rrn": ""
+  },
+  "items": {}
+}
