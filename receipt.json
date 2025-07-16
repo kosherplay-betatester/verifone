@@ -1,19 +1,40 @@
 {
-  "timestamp": "2025-07-15 13:09:16",
-  "amount": 0.0,
+  "timestamp": "2025-07-16 12:50:48",
+  "amount": 9.01,
   "currency": "",
-  "result": "פעולת הביטול נכשלה",
+  "result": "הצלחה",
   "card": {
-    "masked_pan": "",
-    "brand": "",
-    "issuer": "",
-    "expiry": ""
+    "masked_pan": "458056******8127",
+    "brand": "02",
+    "issuer": "06",
+    "expiry": "0730"
   },
   "transaction": {
-    "type": "",
-    "auth_num": "",
-    "trans_id": "",
-    "rrn": ""
+    "type": "01",
+    "auth_num": "0000000",
+    "trans_id": "X98FMNZ-0004077",
+    "rrn": "000000000000"
   },
-  "items": {}
+  "items": {
+    "terminal_name": "EMV WS Tווריפון",
+    "terminal_id": "0883662",
+    "app_version": "3_7_6_0000",
+    "ACQUIRER_ID": "17324",
+    "timestamp_local": "16/07/25 12:50",
+    "transaction_type": "עסקת חיוב",
+    "amount_text": "9.01",
+    "currency_text": "ש\"ח",
+    "authorizer": "נדחה ע`י חברה",
+    "uid": "25071612503108836628942",
+    "voucher_number": "81074024",
+    "card_name": "MAX VISA",
+    "masked_pan_tail": "8127",
+    "credit_terms": "רגיל",
+    "chip_app_id": "A0000000031010",
+    "atc": "0025",
+    "psn": "01",
+    "arc": "05",
+    "TVR": "0000001000",
+    "ashrait_version": "4.17.0"
+  }
 }

@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# gui/main_window.py  –  FULL FILE  (v2.2 • auto-EOD removed)
+# gui/main_window.py  –  FULL FILE  (v2.3 • added GET_TRAN_DETAILS webhook support)
 
 """
 Main admin window for Verifone-P400 desktop app
 ==============================================
 
-Changes in v2.2
+Changes in v2.3
 ---------------
-• **Removed** the automatic EOD scheduler and its time-picker.
-  EOD can now be triggered only manually via the “EOD” button.
+• Added `cmd_get_trans_details` method to send REPORT/GET_TRAN_DETAILS for
+  the last known TRANS_ID via webhook.
+• Updated WebhookServer instantiation to accept the new GET_TRAN_DETAILS endpoint.
 
-Earlier v2.1
+Earlier v2.2
 ------------
-• Forced all log text to black so both panes show a single, consistent colour.
+• Removed the automatic EOD scheduler and its time-picker.
+  EOD can now be triggered only manually via the “EOD” button.
 """
 
 from __future__ import annotations
@@ -32,10 +34,10 @@ from PyQt5.QtWidgets import (
 )
 
 # Project-local helpers
-from config   import load_settings, load_mac, save_settings, save_mac
-from network  import SockThread, WebhookServer
-from utils    import rand_session, des3_decrypt
-from xml_sign import env_xml, sign_xml, template_xml
+from config    import load_settings, load_mac, save_settings, save_mac
+from network   import SockThread, WebhookServer
+from utils     import rand_session, des3_decrypt
+from xml_sign  import env_xml, sign_xml, template_xml
 from pay_process import QuickSaleMixin            # ⬅ payment FSM lives here
 
 
@@ -193,7 +195,12 @@ class MainWindow(QuickSaleMixin, QMainWindow):       # mixin *first* in MRO
         # ---------- Webhook server ----------
         host = cfg.get("webhook_host", "localhost") or "localhost"
         port = int(cfg.get("webhook_port", 8080))
-        self.webhook = WebhookServer(host, port, self._from_webhook)   # _from_webhook in mixin
+        # pass both callbacks: quick-sale and GET_TRAN_DETAILS
+        self.webhook = WebhookServer(
+            host, port,
+            self._from_webhook,
+            self.cmd_get_trans_details
+        )
         self.webhook.start()
 
     # ══════════════════════════════════════════════════════
@@ -273,6 +280,23 @@ class MainWindow(QuickSaleMixin, QMainWindow):       # mixin *first* in MRO
                       bool(int(self.train_combo.currentText())), self.mac_key)
         self._send(xml)
 
+    def cmd_get_trans_details(self):
+        """
+        Send REPORT/GET_TRAN_DETAILS for the last known TRANS_ID,
+        then publish its receipt via the webhook queue.
+        """
+        if not self._trans_id:
+            self._crit("GetDetails", "No last transaction available")
+            return
+
+        body = f"<TRANS_ID>{self._trans_id}</TRANS_ID>"
+        xml = env_xml(
+            "REPORT", "GET_TRAN_DETAILS", self.session,
+            bool(int(self.train_combo.currentText())), self.mac_key,
+            body
+        )
+        self._send(xml)
+
     def admin_cmd(self):
         cmd = self.admin_edit.text().strip().upper()
         if not cmd:
@@ -316,7 +340,7 @@ class MainWindow(QuickSaleMixin, QMainWindow):       # mixin *first* in MRO
 
     # ══════════════════════════════════════════════════════
     # Log search
-    # ══════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════
     def search_logs(self):
         term = self.search_edit.text()
         for pane in (self.sent_log, self.recv_log):
