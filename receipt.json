@@ -1,40 +1,16 @@
 {
-  "timestamp": "2025-07-16 12:50:48",
-  "amount": 9.01,
-  "currency": "",
+  "fetched_at": "2025-07-16 14:56:50",
   "result": "הצלחה",
-  "card": {
-    "masked_pan": "458056******8127",
-    "brand": "02",
-    "issuer": "06",
-    "expiry": "0730"
-  },
-  "transaction": {
-    "type": "01",
-    "auth_num": "0000000",
-    "trans_id": "X98FMNZ-0004077",
-    "rrn": "000000000000"
-  },
   "items": {
-    "terminal_name": "EMV WS Tווריפון",
-    "terminal_id": "0883662",
-    "app_version": "3_7_6_0000",
-    "ACQUIRER_ID": "17324",
-    "timestamp_local": "16/07/25 12:50",
-    "transaction_type": "עסקת חיוב",
-    "amount_text": "9.01",
-    "currency_text": "ש\"ח",
-    "authorizer": "נדחה ע`י חברה",
-    "uid": "25071612503108836628942",
-    "voucher_number": "81074024",
-    "card_name": "MAX VISA",
-    "masked_pan_tail": "8127",
-    "credit_terms": "רגיל",
-    "chip_app_id": "A0000000031010",
-    "atc": "0025",
-    "psn": "01",
-    "arc": "05",
-    "TVR": "0000001000",
-    "ashrait_version": "4.17.0"
+    "trans_id": "X98FMNZ-0004103",
+    "amount": 3.01,
+    "masked_pan": "531084******9139",
+    "tran_type": "01",
+    "credit_terms": 1,
+    "payments_number": 0,
+    "first_payment": 0.0,
+    "next_payment": 0.0,
+    "terminal_timestamp": "07/16/2025 14:54:06",
+    "issuer_auth_num": "2141732"
   }
 }

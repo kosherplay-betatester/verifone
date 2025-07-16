@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# pay_process.py  –  FULL FILE  (v4.2‑r18 • GET_DETAILS standalone vs recovery fix + missing finish call)
+# pay_process.py  –  FULL FILE  (v4.2‑r18 • GET_DETAILS standalone vs recovery fix)
 
 """
 Verifone‑P400 Quick‑Sale finite‑state machine
@@ -8,12 +8,10 @@ Verifone‑P400 Quick‑Sale finite‑state machine
 
 r18 (2025‑07‑16)
 ----------------
-• Standalone GET_TRAN_DETAILS (admin or webhook) now always publishes its receipt JSON,
-  even if not in a Quick‑Sale flow.
-• Recovery GET_TRAN_DETAILS (in‑flow) falls through the FSM so that on error it will
-  send FINISH_TRAN (correctly), hide the spinner, and clear the transaction.
-• Signal‑based webhook bridge and manual‑entry chooser unchanged.
-• All other logic unchanged.
+• Standalone GET_TRAN_DETAILS now saves a receipt.json whose top‑level “items”
+  matches the normal receipt structure (or falls back to raw on parse errors).
+• Recovery GET_TRAN_DETAILS (in‑flow) still falls through the FSM to finish/void.
+• All other features unchanged.
 """
 
 from __future__ import annotations
@@ -126,7 +124,7 @@ class QuickSaleMixin:
     Must be first in MainWindow MRO.
     """
 
-    enqueue_qs = pyqtSignal(float, str)  # webhook thread → GUI thread
+    enqueue_qs = pyqtSignal(float, str)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -370,10 +368,54 @@ class QuickSaleMixin:
         self.sent_log.append(sent)
         self.recv_log.append(recv)
 
-        # Standalone GET_TRAN_DETAILS (admin/webhook)
+        # Standalone GET_TRAN_DETAILS → save & return receipt.json with "items"
         if "<COMMAND>GET_TRAN_DETAILS" in sent and not self.qs_active:
-            self._receipt_sent = False
-            self._publish_json_receipt(recv)
+            import xml.etree.ElementTree as ET
+            from datetime import datetime
+
+            try:
+                wrapped = f"<root>{recv}</root>"
+                root    = ET.fromstring(wrapped)
+                tran    = root.find(".//TRAN_DETAILS")
+            except ET.ParseError:
+                tran = None
+
+            if tran is None:
+                fallback = {
+                    "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "result":     _tag(recv, "POS_TEXT") or _tag(recv, "RESULT_TEXT"),
+                    "raw":        recv
+                }
+                with open("receipt.json", "w", encoding="utf-8") as fp:
+                    json.dump(fallback, fp, ensure_ascii=False, indent=2)
+                self.webhook.publish(json.dumps(fallback, ensure_ascii=False).encode())
+                return
+
+            items: Dict[str, object] = {
+                "trans_id":           tran.findtext("TRANS_ID", ""),
+                "amount":             float(tran.findtext("TRANSACTION_AMOUNT", "0") or 0),
+                "masked_pan":         tran.findtext("MASKED_PAN", ""),
+                "tran_type":          tran.findtext("TRAN_TYPE", ""),
+                "credit_terms":       int(tran.findtext("CREDIT_TERMS", "0") or 0),
+                "payments_number":    int(tran.findtext("PAYMENTS_NUMBER", "0") or 0),
+                "first_payment":      float(tran.findtext("FIRST_PAYMENT_AMOUNT", "0") or 0),
+                "next_payment":       float(tran.findtext("NEXT_PAYMENT_AMOUNT", "0") or 0),
+                "terminal_timestamp": tran.findtext("TRAN_TIME_STAMP", ""),
+            }
+            issuer = tran.findtext("ISSUER_AUTH_NUM", "").strip()
+            if issuer:
+                items["issuer_auth_num"] = issuer
+
+            receipt = {
+                "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "result":     _tag(recv, "POS_TEXT") or _tag(recv, "RESULT_TEXT"),
+                "items":      items
+            }
+
+            with open("receipt.json", "w", encoding="utf-8") as fp:
+                json.dump(receipt, fp, ensure_ascii=False, indent=2)
+
+            self.webhook.publish(json.dumps(receipt, ensure_ascii=False).encode())
             return
 
         # SHVA‑ID guard
@@ -450,8 +492,6 @@ class QuickSaleMixin:
                     self._send_finish_tran()
                     return
 
-                # Recovery: AUTHORIZE incomplete → GET_DETAILS
-                self._info("Recovery", "AUTHORIZE incomplete – GET_DETAILS")
                 body = f"<TRANS_ID>{self._trans_id}</TRANS_ID>"
                 self._qs_phase = "GET_DETAILS"
                 self._send(env_xml(
@@ -461,7 +501,6 @@ class QuickSaleMixin:
                 return
 
             if "<COMMAND>GET_TRAN_DETAILS" in sent:
-                # In‑flow GET_DETAILS → publish + finish or void
                 auth = _issuer_auth(recv)
                 approved = (
                     _result_code(recv) == 0
@@ -489,7 +528,6 @@ class QuickSaleMixin:
                         bool(int(self.train_combo.currentText())), self.mac_key, body
                     ))
                 else:
-                    # <—— FIXED: actually call the method, not reference it
                     self._send_finish_tran()
                 return
 
