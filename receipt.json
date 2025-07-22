@@ -1,16 +1,40 @@
 {
-  "fetched_at": "2025-07-16 14:56:50",
+  "timestamp": "2025-07-22 12:15:54",
+  "amount": 7.01,
+  "currency": "",
   "result": "הצלחה",
-  "items": {
-    "trans_id": "X98FMNZ-0004103",
-    "amount": 3.01,
+  "card": {
     "masked_pan": "531084******9139",
-    "tran_type": "01",
-    "credit_terms": 1,
-    "payments_number": 0,
-    "first_payment": 0.0,
-    "next_payment": 0.0,
-    "terminal_timestamp": "07/16/2025 14:54:06",
-    "issuer_auth_num": "2141732"
+    "brand": "01",
+    "issuer": "01",
+    "expiry": "0531"
+  },
+  "transaction": {
+    "type": "01",
+    "auth_num": "2159345",
+    "trans_id": "X98FMNZ-0004426",
+    "rrn": "520312159345"
+  },
+  "items": {
+    "terminal_name": "EMV WS Tווריפון",
+    "terminal_id": "0883662",
+    "app_version": "3_7_7_0002",
+    "ACQUIRER_ID": "71506",
+    "timestamp_local": "22/07/25 12:14",
+    "transaction_type": "עסקת חיוב",
+    "amount_text": "7.01",
+    "currency_text": "ש\"ח",
+    "issuer_auth_num": "2159345",
+    "authorizer": "חברה",
+    "uid": "25072212153908836620528",
+    "RRN": "520312159345",
+    "voucher_number": "90074033",
+    "card_name": "יורוקרד מסטרקרד",
+    "masked_pan_tail": "9139",
+    "credit_terms": "תשלומים",
+    "first_installment": "3.50",
+    "additional_payments": "1",
+    "installment_amount": "3.51",
+    "ashrait_version": "4.17.0"
   }
 }
