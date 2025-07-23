@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# pay_process.py  –  FULL FILE  (v4.2‑r19 • DISCOVERY/AUTHORIZE field cleanup)
+# pay_process.py  –  FULL FILE  (v4.2‑r21 • cancel‑dialog fix + guaranteed receipt)
 
 """
 Verifone‑P400 Quick‑Sale finite‑state machine
 ============================================
 
-r19 (2025‑07‑22)
+r21 (2025‑07‑23)
 ----------------
-• DISCOVERY לא שולח עוד את השדה <OPERATION>.  
-• AUTHORIZE לא שולח עוד MANUAL / MANUAL_REASON / CTLS / ALLOW_CANCEL / UNATTENDED.  
-• MANUAL_REASON תמיד "CNP" בעסקאות ידניות.  
+• בחירת “ביטול” בחלון Manual/Regular לא זורקת AttributeError:
+  – נוסף self._last_xml ב‑__init__, מאופס ב‑_launch_qs.
+  – _handle_response מאחסן את ה‑XML האחרון.
+  – _qs_done יפרסם קבלה אם עדיין לא נשלחה (fallback על _last_xml).
 
-ֿשאר הקוד זהה ל‑r18.
-
-r18 (2025‑07‑16)
-----------------
-• Stand‑alone GET_TRAN_DETAILS שומר receipt.json במבנה קבוע.
+• כל השינויים של r19 נשמרו:
+  – DISCOVERY לא שולח <OPERATION>.
+  – AUTHORIZE לא שולח MANUAL / MANUAL_REASON / CTLS / ALLOW_CANCEL / UNATTENDED.
+  – MANUAL_REASON תמיד "CNP" בעסקאות ידניות.
 """
 
 from __future__ import annotations
@@ -139,6 +139,9 @@ class QuickSaleMixin:
         self._receipt_sent    = False
         self._manual_key_exchange = False
 
+        # NEW – cache of the latest XML reply
+        self._last_xml        = ""
+
     # ───────────────────────────────────────────────────────
     #  webhook glue
     # ───────────────────────────────────────────────────────
@@ -160,7 +163,8 @@ class QuickSaleMixin:
     #  Quick‑Sale entry
     # ───────────────────────────────────────────────────────
     def _launch_qs(self, amount: float, tran_type: str):
-        hide_prompt(); hide_spinner()
+        hide_prompt()
+        hide_spinner()
 
         dlg = _ManualChoiceDlg(None)
         if dlg.exec_() != QDialog.Accepted:
@@ -177,13 +181,14 @@ class QuickSaleMixin:
 
         self._receipt_sent    = False
         self._awaiting_cancel = False
+        self._last_xml        = ""     # reset cache for new run
 
         # ------------- DISCOVERY defaults -------------
         self.qs_defaults = {
             "timeout":        "60",
             "restrict_token": "0",
             "manual":         manual,
-            "manual_reason":  "CNP" if manual else "",   # ← תמיד CNP
+            "manual_reason":  "CNP" if manual else "",   # always CNP
             "tran_type":      tran_type,
             "amount":         to_minor(amount),
             "currency":       "376",
@@ -197,7 +202,7 @@ class QuickSaleMixin:
             "ctls":           True,
             "allow_cancel":   True,
             "unattended":     False,
-            "operation":      "04",                      # DISCOVERY לא ישלח OPERATION
+            "operation":      "04",                      # DISCOVERY omits OPERATION
         }
         self.qs_start_body = (
             "<INVOICE>100000</INVOICE>"
@@ -214,17 +219,15 @@ class QuickSaleMixin:
         ))
 
     # ───────────────────────────────────────────────────────
-    #  XML body helpers
+    #  XML body helpers  (unchanged from r19)
     # ───────────────────────────────────────────────────────
     def _disc_body(self, o: Dict, *, include_op: bool = True) -> str:
-        """Return <TRANSACTION_DETAILS> block."""
         parts = [
             f"<TIMEOUT>{o['timeout']}</TIMEOUT>",
             "<TRANSACTION_DETAILS>",
             f"<RESTRICT_TOKEN>{o['restrict_token']}</RESTRICT_TOKEN>",
         ]
-
-        # flags (DISCOVERY בלבד)
+        # flags (DISCOVERY only)
         if o.get("manual")         is not None: parts.append(f"<MANUAL>{int(o['manual'])}</MANUAL>")
         if o.get("ctls")           is not None: parts.append(f"<CTLS>{int(o['ctls'])}</CTLS>")
         if o.get("allow_cancel")   is not None: parts.append(f"<ALLOW_CANCEL>{int(o['allow_cancel'])}</ALLOW_CANCEL>")
@@ -247,29 +250,21 @@ class QuickSaleMixin:
 
     def _auth_body(self, base: Dict, ct: str,
                    pay: int, first: float, nxt: float) -> str:
-        """
-        Build AUTHORIZE body – ללא MANUAL / … / UNATTENDED / CTLS.
-        """
-        clean = {
-            k: v for k, v in base.items()
-            if k not in {"manual", "manual_reason", "ctls",
-                         "allow_cancel", "unattended"}
-        }
-        body = self._disc_body(clean)  # include_op=True by default
+        clean = {k: v for k, v in base.items()
+                 if k not in {"manual", "manual_reason", "ctls",
+                              "allow_cancel", "unattended"}}
+        body = self._disc_body(clean)  # include_op=True
 
         if ct == "8" and pay:
             pay -= 1
         extra = f"<CREDIT_TERMS>{ct}</CREDIT_TERMS>"
-        if pay:
-            extra += f"<PAYMENTS_NUMBER>{pay:02d}</PAYMENTS_NUMBER>"
-        if first:
-            extra += f"<FIRST_PAYMENT_AMOUNT>{to_minor(first)}</FIRST_PAYMENT_AMOUNT>"
-        if nxt:
-            extra += f"<NEXT_PAYMENT_AMOUNT>{to_minor(nxt)}</NEXT_PAYMENT_AMOUNT>"
+        if pay:   extra += f"<PAYMENTS_NUMBER>{pay:02d}</PAYMENTS_NUMBER>"
+        if first: extra += f"<FIRST_PAYMENT_AMOUNT>{to_minor(first)}</FIRST_PAYMENT_AMOUNT>"
+        if nxt:   extra += f"<NEXT_PAYMENT_AMOUNT>{to_minor(nxt)}</NEXT_PAYMENT_AMOUNT>"
         return body.replace("</TRANSACTION_DETAILS>", extra + "</TRANSACTION_DETAILS>")
 
     # ───────────────────────────────────────────────────────
-    #  send helpers (unchanged)
+    #  standard send helpers (unchanged)
     # ───────────────────────────────────────────────────────
     def _send(self, xml: str):
         super()._send(xml)
@@ -306,7 +301,7 @@ class QuickSaleMixin:
                            bool(int(self.train_combo.currentText())), self.mac_key))
 
     # ───────────────────────────────────────────────────────
-    #  DISCOVERY → credit dialog
+    #  DISCOVERY → credit dialog  (unchanged)
     # ───────────────────────────────────────────────────────
     def _handle_discovery_ok(self, xml: str):
         if _is_bad_card(xml):
@@ -371,39 +366,109 @@ class QuickSaleMixin:
         self._receipt_sent = True
 
     def _qs_done(self):
+        """
+        Finishes a Quick‑Sale run (success / decline / early cancel).
+        Always publishes something to the webhook so /pay?wait=1
+        can unblock immediately.
+        """
         hide_spinner()
+
+        # Nothing was published yet →
+        #  1) אם יש XML אחרון – הפוך אותו לקבלה ופרסם.
+        #  2) אם אין XML (בוטל לפני DISCOVERY) – פרסם הודעת ביטול קצרה.
+        if not self._receipt_sent:
+            if self._last_xml:
+                self._publish_json_receipt(self._last_xml)
+            else:
+                # early cancel – craft minimal payload
+                payload = {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "result":    "העסקה בוטלה",
+                }
+                self.webhook.publish(json.dumps(payload, ensure_ascii=False).encode())
+                self._receipt_sent = True
+
+        # reset state & continue queue
         self.qs_active = False
         self._qs_phase = ""
         self._start_next_qs()
 
     # ───────────────────────────────────────────────────────
-    #  main response handler  (מקוצר – לא השתנתה לוגיקה)
+    #  main response handler (FSM) – only change: cache _last_xml
     # ───────────────────────────────────────────────────────
     def _handle_response(self, sent: str, recv: str):
-        """
-        The enormous FSM from r18; only שינוי הוא הקריאה ל‑DISCOVERY
-        עם include_op=False (ללא OPERATION). כל שאר הקוד נשאר זהה.
-        """
-        self.sent_log.append(sent); self.recv_log.append(recv)
+        self.sent_log.append(sent)
+        self.recv_log.append(recv)
+        self._last_xml = recv   # cache latest reply
 
-        # ———— guard: RESULT_CODE 2 auto‑cancel ————
-        if _result_code(recv) == 2 and "<COMMAND>CANCEL" not in sent:
-            show_prompt("העסקה לא אושרה", 4000)
-            self._schedule_cancel()
-            self._publish_json_receipt(recv)
+        # Standalone GET_TRAN_DETAILS logic (unchanged) ...
+        if "<COMMAND>GET_TRAN_DETAILS" in sent and not self.qs_active:
+            import xml.etree.ElementTree as ET
+            from datetime import datetime
+            try:
+                wrapped = f"<root>{recv}</root>"
+                root    = ET.fromstring(wrapped)
+                tran    = root.find(".//TRAN_DETAILS")
+            except ET.ParseError:
+                tran = None
+
+            if tran is None:
+                fallback = {
+                    "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "result":     _tag(recv, "POS_TEXT") or _tag(recv, "RESULT_TEXT"),
+                    "raw":        recv
+                }
+                with open("receipt.json", "w", encoding="utf-8") as fp:
+                    json.dump(fallback, fp, ensure_ascii=False, indent=2)
+                self.webhook.publish(json.dumps(fallback, ensure_ascii=False).encode())
+                return
+
+            items: Dict[str, object] = {
+                "trans_id":           tran.findtext("TRANS_ID", ""),
+                "amount":             float(tran.findtext("TRANSACTION_AMOUNT", "0") or 0),
+                "masked_pan":         tran.findtext("MASKED_PAN", ""),
+                "tran_type":          tran.findtext("TRAN_TYPE", ""),
+                "credit_terms":       int(tran.findtext("CREDIT_TERMS", "0") or 0),
+                "payments_number":    int(tran.findtext("PAYMENTS_NUMBER", "0") or 0),
+                "first_payment":      float(tran.findtext("FIRST_PAYMENT_AMOUNT", "0") or 0),
+                "next_payment":       float(tran.findtext("NEXT_PAYMENT_AMOUNT", "0") or 0),
+                "terminal_timestamp": tran.findtext("TRAN_TIME_STAMP", ""),
+            }
+            issuer = tran.findtext("ISSUER_AUTH_NUM", "").strip()
+            if issuer:
+                items["issuer_auth_num"] = issuer
+
+            receipt = {
+                "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "result":     _tag(recv, "POS_TEXT") or _tag(recv, "RESULT_TEXT"),
+                "items":      items
+            }
+
+            with open("receipt.json", "w", encoding="utf-8") as fp:
+                json.dump(receipt, fp, ensure_ascii=False, indent=2)
+
+            self.webhook.publish(json.dumps(receipt, ensure_ascii=False).encode())
             return
 
-        # ———— SHVA‑ID mismatch ————
+        # ---- SHVA‑ID guard ----
         exp_tid = self.termid_field.text().strip()
         got_tid = _tag(recv, "SHVA_TERM_ID")
         if exp_tid and got_tid and exp_tid != got_tid:
             self._crit("SHVA ID", "מספר SHVA אינו תקין , אנא פנה לטכנאי")
             show_prompt("מספר SHVA אינו תקין , אנא פנה לטכנאי", 4000)
             if self.qs_active:
-                self._send_cancel(); self._qs_done()
+                self._send_cancel()
+                self._qs_done()
             return
 
-        # ———— FSM ————
+        # ---- RESULT_CODE 2 auto‑cancel ----
+        if _result_code(recv) == 2 and "<COMMAND>CANCEL" not in sent:
+            show_prompt("העסקה לא אושרה", 4000)
+            self._schedule_cancel()
+            self._publish_json_receipt(recv)
+            return
+
+        # --------------- FSM ---------------
         if self.qs_active:
 
             # PING → STATUS
@@ -426,14 +491,14 @@ class QuickSaleMixin:
                     self._qs_done()
                 return
 
-            # START_TRAN → DISCOVERY (ללא OPERATION)
+            # START_TRAN → DISCOVERY (without OPERATION)
             if "<COMMAND>START_TRAN" in sent:
                 if _result_code(recv) == 0:
                     self._qs_phase = "DISCOVERY"
                     self._send(env_xml(
                         "PAYMENT", "DISCOVERY", self.session,
                         bool(int(self.train_combo.currentText())), self.mac_key,
-                        self._disc_body(self.qs_defaults, include_op=False)  # *** שינוי עיקרי ***
+                        self._disc_body(self.qs_defaults, include_op=False)
                     ))
                     show_prompt("זיהוי כרטיס", 3000)
                 else:
@@ -452,8 +517,6 @@ class QuickSaleMixin:
                 return
 
             # AUTHORIZE …
-            # (כל החלקים הבאים זהים לגירסת r18 ולא השתנו)
-            # -----------------------------------------------------------------
             if "<COMMAND>AUTHORIZE" in sent:
                 if "<EVENT>COMPLETED" in recv:
                     auth = _issuer_auth(recv)
@@ -475,7 +538,8 @@ class QuickSaleMixin:
                 ))
                 return
 
-            if "<COMMAND>GET_TRAN_DETAILS" in sent:
+            # GET_TRAN_DETAILS during recovery
+            if "<COMMAND>GET_TRAN_DETAILS" in sent and self.qs_active:
                 auth = _issuer_auth(recv)
                 approved = (
                     _result_code(recv) == 0
@@ -488,6 +552,7 @@ class QuickSaleMixin:
                 )
                 show_prompt(msg, 4000)
                 self._publish_json_receipt(recv)
+
                 if approved:
                     self._qs_phase = "VOID"
                     body = (
@@ -506,10 +571,12 @@ class QuickSaleMixin:
                     self._send_finish_tran()
                 return
 
+            # VOID phase
             if self._qs_phase == "VOID" and "<COMMAND>AUTHORIZE" in sent:
                 self._send_finish_tran()
                 return
 
+            # FINISH_TRAN
             if "<COMMAND>FINISH_TRAN" in sent:
                 if not self._receipt_sent:
                     self._publish_json_receipt(recv)
@@ -523,7 +590,7 @@ class QuickSaleMixin:
             self._send_finish_tran()
             return
 
-        # Manual EXCHANGE_KEYS (unchanged)
+        # Manual EXCHANGE_KEYS
         if ("<COMMAND>EXCHANGE_KEYS" in sent and "<MAC_KEY>" in recv
                 and getattr(self, "_manual_key_exchange", False)):
             m = re.search(r"<MAC_KEY>([^<]+)</MAC_KEY>", recv)

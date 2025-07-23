@@ -1,33 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# network.py  –  FULL FILE  (v1.67 • per‑response logging)
+# network.py  –  FULL FILE  (v1.68 • live‑logging + guaranteed receipt publish)
 
 """
 Networking helpers for the Verifone‑P400 desktop app
 ====================================================
 
-v1.67 (2025‑07‑22)
+v1.68 (2025‑07‑23)
 ------------------
-• **SockThread.run** נרשם כעת *כל* <RESPONSE> שמתקבל בלייב — מיד
-  כאשר סוגר </RESPONSE> מגיע — במקום להמתין עד סוף החיבור.  
-  כך שה‑logs.txt / logs_readable.txt מראים אירועים במועד המדויק של
-  הקבלה.
+1. **Per‑response logging** (v1.67):  כל  <RESPONSE> נרשם מיד עם קבלתו.  
+2. **Webhook wait‑loop**:  ‎/pay?wait=1 ו‑/GET_TRAN_DETAILS?wait=1  
+   ממתינים עד **3 דקות** (במקום 65 שניות) וממשיכים לבדוק
+   עד שמתקבל receipt.json; כך לא מתקבל עוד “timeout” כאשר הקובץ
+   נשמר אך הפאבליש הגיע מעט מאוחר יותר.
 
-Timing rules (לא שונו)
-----------------------
-| Group          | Commands                               | chunk_timeout | max_wait |
-|----------------|----------------------------------------|---------------|----------|
-| QUICK_CMDS     | PING STATUS START_TRAN FINISH_TRAN     | 0.4 s         | 4 s      |
-| USER_CMDS      | DISCOVERY CARD_DATA SIGNATURE_CAPTURE  | 3 s           | 65 s     |
-| RECEIPT_CMDS   | AUTHORIZE REFUND                       | 1.2 s         | 15 s     |
-| others         | fallback                               | 1 s           | 10 s     |
+Timing rules (ל‑TCP) לא שונו.
 """
 
 from __future__ import annotations
 
-import re
-import socket
-import queue
+import re, socket, queue, time
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread, Event
@@ -38,7 +30,7 @@ from logger          import log_traffic
 from utils           import to_minor
 
 # ───────────────────────────────────────────────────────────
-# /pay restrictions
+#  /pay restrictions
 # ───────────────────────────────────────────────────────────
 VALID_TYPES = {"01", "02", "03", "06", "30", "53", "55"}
 
@@ -48,20 +40,17 @@ VALID_TYPES = {"01", "02", "03", "06", "30", "53", "55"}
 # ══════════════════════════════════════════════════════════
 class SockThread(QThread):
     """
-    One‑shot TCP thread that sends a single XML command to the P400 and
-    logs every RESPONSE immediately upon arrival.
+    One‑shot TCP thread that sends a single XML command, logs each RESPONSE
+    the moment it closes, and emits full payload back to the GUI.
     """
 
-    # (sent_xml, received_text) will be delivered back to the GUI
     result = pyqtSignal(str, str)
 
     QUICK_CMDS   = {"PING", "STATUS", "START_TRAN", "FINISH_TRAN"}
     USER_CMDS    = {"DISCOVERY", "CARD_DATA", "SIGNATURE_CAPTURE"}
     RECEIPT_CMDS = {"AUTHORIZE", "REFUND"}
 
-    # ───────────────────────────────────────────────────────
-    #  helpers
-    # ───────────────────────────────────────────────────────
+    # ---------- helpers ----------
     def _is_done(self, buf: bytes, cmd: str) -> bool:
         if cmd in self.QUICK_CMDS or cmd in self.USER_CMDS:
             return b"<EVENT>COMPLETED" in buf
@@ -73,17 +62,15 @@ class SockThread(QThread):
         if cmd in self.RECEIPT_CMDS: return 1.2, 15.0
         return 1.0, 10.0
 
-    # ───────────────────────────────────────────────────────
-    #  main
-    # ───────────────────────────────────────────────────────
+    # ---------- run ----------
     def __init__(self, ip: str, port: int, msg: str):
         super().__init__(None)
         self.ip, self.port, self.msg = ip, port, msg
 
     def run(self):
         sent        = self.msg
-        recv_full   = b""      # כל מה שנקבל – לשידור חזרה ל‑GUI
-        recv_proc   = b""      # נתונים שטרם נרשמו
+        recv_full   = b""
+        recv_chunk  = b""
         start_time  = datetime.now()
 
         m = re.search(r"<COMMAND>([^<]+)</COMMAND>", sent)
@@ -105,16 +92,13 @@ class SockThread(QThread):
                     if not chunk:
                         break
 
-                    # צוברים ומעבדים
                     recv_full += chunk
-                    recv_proc += chunk
+                    recv_chunk += chunk
 
-                    # רישום בלייב – כל RESPONSE שנשלם
-                    while b"</RESPONSE>" in recv_proc:
-                        idx   = recv_proc.index(b"</RESPONSE>") + len(b"</RESPONSE>")
-                        block = recv_proc[:idx]
-                        recv_proc = recv_proc[idx:]
-
+                    # live log each complete </RESPONSE>
+                    while b"</RESPONSE>" in recv_chunk:
+                        end = recv_chunk.index(b"</RESPONSE>") + len(b"</RESPONSE>")
+                        block, recv_chunk = recv_chunk[:end], recv_chunk[end:]
                         log_traffic(
                             sent,
                             block.decode("utf-8", "replace"),
@@ -127,15 +111,14 @@ class SockThread(QThread):
         except Exception as exc:
             recv_full = f"Error: {exc}".encode()
 
-        # שארית שאינה RESPONSE (למשל TRANSACTION שלם)
-        if recv_proc.strip():
+        # leftover (e.g. full </TRANSACTION>)
+        if recv_chunk.strip():
             log_traffic(
                 sent,
-                recv_proc.decode("utf-8", "replace"),
+                recv_chunk.decode("utf-8", "replace"),
                 start_time,
                 datetime.now()
             )
-            recv_full = recv_full  # כבר מכיל הכול
 
         self.result.emit(sent, recv_full.decode("utf-8", "replace"))
 
@@ -146,38 +129,32 @@ class SockThread(QThread):
 class WebhookServer(Thread):
     """
     Tiny HTTP server exposing /pay, /receipt and /GET_TRAN_DETAILS endpoints.
-
-    Features
-    --------
-    • /pay?amount=…[&type=…][&wait=1]     – trigger Quick‑Sale
-    • /receipt.json                        – returns last JSON payload
-    • /GET_TRAN_DETAILS[?wait=1]           – trigger GET_TRAN_DETAILS
     """
 
     def __init__(self, host: str, port: int,
                  pay_callback, details_callback):
         super().__init__(daemon=True)
-        self.host                = host
-        self.port                = port
-        self._pay_callback       = pay_callback
-        self._details_callback   = details_callback
+        self.host              = host
+        self.port              = port
+        self._pay_callback     = pay_callback
+        self._details_callback = details_callback
         self._q: "queue.Queue[bytes]" = queue.Queue()
-        self._signal             = Event()
-        self._last               = b"{}"
+        self._signal           = Event()
+        self._last             = b"{}"
 
-    # ---------- publish JSON back to client ----------------
+    # ---------- publish ----------
     def publish(self, data: bytes):
         data = data or b"{}"
         self._q.put(data)
         self._last = data
         self._signal.set()
 
-    # ---------- HTTP server loop ---------------------------
+    # ---------- HTTP server ----------
     def run(self):
         outer = self
 
         class H(BaseHTTPRequestHandler):
-            # --- helpers ---
+            # ----- helpers -----
             def _plain(self, st, body=b""):
                 self.send_response(st)
                 self.send_header("Content-Type", "text/plain")
@@ -195,7 +172,7 @@ class WebhookServer(Thread):
                 self.end_headers()
                 self.wfile.write(body)
 
-            # --- CORS preflight ---
+            # ----- CORS -----
             def do_OPTIONS(self):
                 self.send_response(204)
                 self.send_header("Access-Control-Allow-Origin", "*")
@@ -204,7 +181,23 @@ class WebhookServer(Thread):
                 self.send_header("Access-Control-Max-Age", "86400")
                 self.end_headers()
 
-            # --- GET handler ---
+            # ----- utility: wait up to 180 s for publish -----
+            def _wait_for_receipt(self, max_sec: int = 180):
+                expiry = time.time() + max_sec
+                while time.time() < expiry:
+                    left = expiry - time.time()
+                    if outer._signal.wait(timeout=min(2, left)):  # poll every ≤2 s
+                        try:
+                            body = outer._q.get_nowait()
+                        except queue.Empty:
+                            outer._signal.clear()
+                            continue
+                        if outer._q.empty():
+                            outer._signal.clear()
+                        return body
+                return None  # timeout
+
+            # ----- GET -----
             def do_GET(self):
                 try:
                     p = urlparse(self.path)
@@ -220,14 +213,9 @@ class WebhookServer(Thread):
                         outer._details_callback()
                         if not wait:
                             return self._plain(200, b"OK")
-                        if not outer._signal.wait(timeout=65):
+                        body = self._wait_for_receipt()
+                        if body is None:
                             return self._plain(504, b"timeout")
-                        try:
-                            body = outer._q.get_nowait()
-                        except queue.Empty:
-                            return self._plain(504, b"timeout")
-                        if outer._q.empty():
-                            outer._signal.clear()
                         return self._json(200, body)
 
                     # /pay
@@ -252,14 +240,9 @@ class WebhookServer(Thread):
                     if not wait:
                         return self._plain(200, b"OK")
 
-                    if not outer._signal.wait(timeout=65):
+                    body = self._wait_for_receipt()
+                    if body is None:
                         return self._plain(504, b"timeout")
-                    try:
-                        body = outer._q.get_nowait()
-                    except queue.Empty:
-                        return self._plain(504, b"timeout")
-                    if outer._q.empty():
-                        outer._signal.clear()
                     return self._json(200, body)
 
                 except (ConnectionAbortedError, BrokenPipeError):
