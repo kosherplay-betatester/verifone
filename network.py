@@ -1,33 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# network.py  –  FULL FILE  (v1.66 • GET_TRAN_DETAILS endpoint)
+# network.py  –  FULL FILE  (v1.67 • per‑response logging)
 
 """
-Networking helpers for the Verifone-P400 desktop app
+Networking helpers for the Verifone‑P400 desktop app
 ====================================================
 
-Changes in v1.66
-----------------
-• Added GET_TRAN_DETAILS support in WebhookServer:
-  – new /GET_TRAN_DETAILS path invokes the details_callback,
-    waits if ?wait=1, and returns the JSON receipt.
+v1.67 (2025‑07‑22)
+------------------
+• **SockThread.run** נרשם כעת *כל* <RESPONSE> שמתקבל בלייב — מיד
+  כאשר סוגר </RESPONSE> מגיע — במקום להמתין עד סוף החיבור.  
+  כך שה‑logs.txt / logs_readable.txt מראים אירועים במועד המדויק של
+  הקבלה.
 
-Changes in v1.65
-----------------
-• **FINISH_TRAN is now treated as a quick command**
-  − Moved from *RECEIPT_CMDS* to *QUICK_CMDS* so the reader waits a
-    maximum of **4 s** instead of 15 s.
-  − Eliminates the long pause before the webhook can start the
-    next transaction once a receipt is printed.
-
-Timing rules
-------------
+Timing rules (לא שונו)
+----------------------
 | Group          | Commands                               | chunk_timeout | max_wait |
 |----------------|----------------------------------------|---------------|----------|
-| QUICK_CMDS     | PING STATUS START_TRAN **FINISH_TRAN** | 0.4 s         | 4 s      |
-| USER_CMDS      | DISCOVERY CARD_DATA SIGNATURE_CAPTURE  | 3 s           | 65 s     |
-| RECEIPT_CMDS   | AUTHORIZE REFUND                       | 1.2 s         | 15 s     |
-| others         | fallback                               | 1 s           | 10 s     |
+| QUICK_CMDS     | PING STATUS START_TRAN FINISH_TRAN     | 0.4 s         | 4 s      |
+| USER_CMDS      | DISCOVERY CARD_DATA SIGNATURE_CAPTURE  | 3 s           | 65 s     |
+| RECEIPT_CMDS   | AUTHORIZE REFUND                       | 1.2 s         | 15 s     |
+| others         | fallback                               | 1 s           | 10 s     |
 """
 
 from __future__ import annotations
@@ -55,18 +48,20 @@ VALID_TYPES = {"01", "02", "03", "06", "30", "53", "55"}
 # ══════════════════════════════════════════════════════════
 class SockThread(QThread):
     """
-    One-shot TCP thread that sends a single XML command to the P400 and
-    collects the response.
+    One‑shot TCP thread that sends a single XML command to the P400 and
+    logs every RESPONSE immediately upon arrival.
     """
 
     # (sent_xml, received_text) will be delivered back to the GUI
     result = pyqtSignal(str, str)
 
-    # FINISH_TRAN re-classified as “quick”
     QUICK_CMDS   = {"PING", "STATUS", "START_TRAN", "FINISH_TRAN"}
     USER_CMDS    = {"DISCOVERY", "CARD_DATA", "SIGNATURE_CAPTURE"}
     RECEIPT_CMDS = {"AUTHORIZE", "REFUND"}
 
+    # ───────────────────────────────────────────────────────
+    #  helpers
+    # ───────────────────────────────────────────────────────
     def _is_done(self, buf: bytes, cmd: str) -> bool:
         if cmd in self.QUICK_CMDS or cmd in self.USER_CMDS:
             return b"<EVENT>COMPLETED" in buf
@@ -78,13 +73,17 @@ class SockThread(QThread):
         if cmd in self.RECEIPT_CMDS: return 1.2, 15.0
         return 1.0, 10.0
 
+    # ───────────────────────────────────────────────────────
+    #  main
+    # ───────────────────────────────────────────────────────
     def __init__(self, ip: str, port: int, msg: str):
         super().__init__(None)
         self.ip, self.port, self.msg = ip, port, msg
 
     def run(self):
         sent        = self.msg
-        recv_buf    = b""
+        recv_full   = b""      # כל מה שנקבל – לשידור חזרה ל‑GUI
+        recv_proc   = b""      # נתונים שטרם נרשמו
         start_time  = datetime.now()
 
         m = re.search(r"<COMMAND>([^<]+)</COMMAND>", sent)
@@ -105,17 +104,40 @@ class SockThread(QThread):
                         continue
                     if not chunk:
                         break
-                    recv_buf += chunk
-                    if self._is_done(recv_buf, cmd):
+
+                    # צוברים ומעבדים
+                    recv_full += chunk
+                    recv_proc += chunk
+
+                    # רישום בלייב – כל RESPONSE שנשלם
+                    while b"</RESPONSE>" in recv_proc:
+                        idx   = recv_proc.index(b"</RESPONSE>") + len(b"</RESPONSE>")
+                        block = recv_proc[:idx]
+                        recv_proc = recv_proc[idx:]
+
+                        log_traffic(
+                            sent,
+                            block.decode("utf-8", "replace"),
+                            start_time,
+                            datetime.now()
+                        )
+
+                    if self._is_done(recv_full, cmd):
                         break
         except Exception as exc:
-            recv_buf = f"Error: {exc}".encode()
+            recv_full = f"Error: {exc}".encode()
 
-        recv_txt  = recv_buf.decode("utf-8", "replace")
-        end_time  = datetime.now()
+        # שארית שאינה RESPONSE (למשל TRANSACTION שלם)
+        if recv_proc.strip():
+            log_traffic(
+                sent,
+                recv_proc.decode("utf-8", "replace"),
+                start_time,
+                datetime.now()
+            )
+            recv_full = recv_full  # כבר מכיל הכול
 
-        log_traffic(sent, recv_txt, start_time, end_time)
-        self.result.emit(sent, recv_txt)
+        self.result.emit(sent, recv_full.decode("utf-8", "replace"))
 
 
 # ══════════════════════════════════════════════════════════
@@ -127,7 +149,7 @@ class WebhookServer(Thread):
 
     Features
     --------
-    • /pay?amount=…[&type=…][&wait=1]     – trigger Quick-Sale
+    • /pay?amount=…[&type=…][&wait=1]     – trigger Quick‑Sale
     • /receipt.json                        – returns last JSON payload
     • /GET_TRAN_DETAILS[?wait=1]           – trigger GET_TRAN_DETAILS
     """
@@ -143,16 +165,19 @@ class WebhookServer(Thread):
         self._signal             = Event()
         self._last               = b"{}"
 
+    # ---------- publish JSON back to client ----------------
     def publish(self, data: bytes):
         data = data or b"{}"
         self._q.put(data)
         self._last = data
         self._signal.set()
 
+    # ---------- HTTP server loop ---------------------------
     def run(self):
         outer = self
 
         class H(BaseHTTPRequestHandler):
+            # --- helpers ---
             def _plain(self, st, body=b""):
                 self.send_response(st)
                 self.send_header("Content-Type", "text/plain")
@@ -170,6 +195,7 @@ class WebhookServer(Thread):
                 self.end_headers()
                 self.wfile.write(body)
 
+            # --- CORS preflight ---
             def do_OPTIONS(self):
                 self.send_response(204)
                 self.send_header("Access-Control-Allow-Origin", "*")
@@ -178,6 +204,7 @@ class WebhookServer(Thread):
                 self.send_header("Access-Control-Max-Age", "86400")
                 self.end_headers()
 
+            # --- GET handler ---
             def do_GET(self):
                 try:
                     p = urlparse(self.path)
@@ -188,7 +215,7 @@ class WebhookServer(Thread):
                     if p.path in ("/receipt", "/receipt.json"):
                         return self._json(200, outer._last)
 
-                    # GET_TRAN_DETAILS endpoint
+                    # /GET_TRAN_DETAILS
                     if p.path.upper() == "/GET_TRAN_DETAILS":
                         outer._details_callback()
                         if not wait:
@@ -203,7 +230,7 @@ class WebhookServer(Thread):
                             outer._signal.clear()
                         return self._json(200, body)
 
-                    # /pay endpoint
+                    # /pay
                     if p.path != "/pay":
                         return self._plain(404, b"Not Found")
 

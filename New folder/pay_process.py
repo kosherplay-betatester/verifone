@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# pay_process.py  –  FULL FILE  (v4.2‑r18 • signal‑based manual chooser)
+# pay_process.py  –  FULL FILE  (v4.2‑r18 • GET_DETAILS standalone vs recovery fix)
 
 """
 Verifone‑P400 Quick‑Sale finite‑state machine
@@ -8,14 +8,10 @@ Verifone‑P400 Quick‑Sale finite‑state machine
 
 r18 (2025‑07‑16)
 ----------------
-• **Signal‑based webhook bridge** – uses a `pyqtSignal` (`enqueue_qs`)
-  to hand off webhook-triggered Quick‑Sale requests to the GUI thread,
-  restoring the thread‑safe pattern from v5.2.
-• **Manual‑entry chooser** – before every Quick‑Sale a dialog pops up
-  (“רגיל” or “ידני”) exactly as in your older working version.
-• All other logic unchanged: bad‑card guard, debit detection,
-  SHVA‑ID validation, RESULT_CODE 2 auto‑cancel, spinner rules,
-  instal‑1 fix, instant receipt publishing, etc.
+• Standalone GET_TRAN_DETAILS now saves a receipt.json whose top‑level “items”
+  matches the normal receipt structure (or falls back to raw on parse errors).
+• Recovery GET_TRAN_DETAILS (in‑flow) still falls through the FSM to finish/void.
+• All other features unchanged.
 """
 
 from __future__ import annotations
@@ -124,11 +120,11 @@ class _ManualChoiceDlg(QDialog):
 # ══════════════════════════════════════════════════════════
 class QuickSaleMixin:
     """
-    Mix-in holding the full Quick-Sale FSM.
+    Mix‑in holding the full Quick‑Sale FSM.
     Must be first in MainWindow MRO.
     """
 
-    enqueue_qs = pyqtSignal(float, str)  # webhook thread → GUI thread
+    enqueue_qs = pyqtSignal(float, str)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -145,8 +141,8 @@ class QuickSaleMixin:
         self.qs_start_body    = ""
         self._awaiting_cancel = False
         self._cancel_timer    = None
-        self._manual_key_exchange = False
         self._receipt_sent    = False
+        self._manual_key_exchange = False
 
     @pyqtSlot(float, str)
     def _from_webhook(self, amount: float, tran_type: str):
@@ -372,6 +368,56 @@ class QuickSaleMixin:
         self.sent_log.append(sent)
         self.recv_log.append(recv)
 
+        # Standalone GET_TRAN_DETAILS → save & return receipt.json with "items"
+        if "<COMMAND>GET_TRAN_DETAILS" in sent and not self.qs_active:
+            import xml.etree.ElementTree as ET
+            from datetime import datetime
+
+            try:
+                wrapped = f"<root>{recv}</root>"
+                root    = ET.fromstring(wrapped)
+                tran    = root.find(".//TRAN_DETAILS")
+            except ET.ParseError:
+                tran = None
+
+            if tran is None:
+                fallback = {
+                    "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "result":     _tag(recv, "POS_TEXT") or _tag(recv, "RESULT_TEXT"),
+                    "raw":        recv
+                }
+                with open("receipt.json", "w", encoding="utf-8") as fp:
+                    json.dump(fallback, fp, ensure_ascii=False, indent=2)
+                self.webhook.publish(json.dumps(fallback, ensure_ascii=False).encode())
+                return
+
+            items: Dict[str, object] = {
+                "trans_id":           tran.findtext("TRANS_ID", ""),
+                "amount":             float(tran.findtext("TRANSACTION_AMOUNT", "0") or 0),
+                "masked_pan":         tran.findtext("MASKED_PAN", ""),
+                "tran_type":          tran.findtext("TRAN_TYPE", ""),
+                "credit_terms":       int(tran.findtext("CREDIT_TERMS", "0") or 0),
+                "payments_number":    int(tran.findtext("PAYMENTS_NUMBER", "0") or 0),
+                "first_payment":      float(tran.findtext("FIRST_PAYMENT_AMOUNT", "0") or 0),
+                "next_payment":       float(tran.findtext("NEXT_PAYMENT_AMOUNT", "0") or 0),
+                "terminal_timestamp": tran.findtext("TRAN_TIME_STAMP", ""),
+            }
+            issuer = tran.findtext("ISSUER_AUTH_NUM", "").strip()
+            if issuer:
+                items["issuer_auth_num"] = issuer
+
+            receipt = {
+                "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "result":     _tag(recv, "POS_TEXT") or _tag(recv, "RESULT_TEXT"),
+                "items":      items
+            }
+
+            with open("receipt.json", "w", encoding="utf-8") as fp:
+                json.dump(receipt, fp, ensure_ascii=False, indent=2)
+
+            self.webhook.publish(json.dumps(receipt, ensure_ascii=False).encode())
+            return
+
         # SHVA‑ID guard
         exp_tid = self.termid_field.text().strip()
         got_tid = _tag(recv, "SHVA_TERM_ID")
@@ -446,7 +492,6 @@ class QuickSaleMixin:
                     self._send_finish_tran()
                     return
 
-                self._info("Recovery", "AUTHORIZE incomplete – GET_DETAILS")
                 body = f"<TRANS_ID>{self._trans_id}</TRANS_ID>"
                 self._qs_phase = "GET_DETAILS"
                 self._send(env_xml(

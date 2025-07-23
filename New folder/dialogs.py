@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# dialogs.py  –  FULL FILE  (v1.6 • dynamic installment recalculation)
+# dialogs.py  –  FULL FILE  (v1.7 • credit‑threshold rule)
 
 """
 Qt Dialogs
 ==========
 
-1. **CreditTermDlg** – בחירת סוג אשראי / מספר תשלומים  
-   • “03 מיידית” מוצג ראשון.  
-   • מוצגות *רק* האפשרויות שאושרו בתשובת DISCOVERY (ללא כפתורים מושבתים).  
-   • אם DISCOVERY לא איפשר אף סוג – מוצגת ברירת־מחדל “03 מיידית”.  
-   • **מחדש (v1.6):** כאשר לשדה “מס׳ תשלומים” משתנה הערך, גם השדות
-     “תשלום ראשון” ו-“תשלום המשך” מחושבים אוטומטית על-פי הסכום הכולל,
-     כך שהערכים תמיד קונסיסטנטיים.
+1. **CreditTermDlg** – בחירת סוג אשראי / מספר תשלומים
+   • “03 מיידית” מוצג ראשון.
+   • מוצגות *רק* האפשרויות שאושרו בתשובת DISCOVERY (ללא כפתורים מושבתים).
+   • **חדש (v1.7)**
+       – “06 קרדיט” מופיע רק אם סכום העסקה ≥ ₪ 75.00,
+         ובמקרה זה מספר‑התשלומים המינימלי ננעל ל‑3.
+   • אם DISCOVERY לא איפשר אף סוג – מוצגת ברירת‑מחדל “03 מיידית”.
+   • **v1.6**: שינוי “מס׳ תשלומים” מחשב אוטומטית תשלום‑ראשון/המשך.
 
 2. **DiscoverDlg** – חלון פרמטרים לפקודת DISCOVERY (לשם השלמות).
 """
@@ -31,7 +32,7 @@ from utils import to_minor
 
 
 # ───────────────────────────────────────────────────────────
-#  Shared pastel-blue stylesheet
+#  Shared pastel‑blue stylesheet
 # ───────────────────────────────────────────────────────────
 _STYLE = """
 QDialog {
@@ -88,11 +89,12 @@ class CreditTermDlg(QDialog):
     ----------
     flags : Dict[str, bool]
         אילו סוגי תשלום מותר לכרטיס (מתשובת DISCOVERY).
-        המפתחות האפשריים: "regular", "special", "immediate", "credit", "installments"
+        המפתחות האפשריים: "regular", "special", "immediate",
+                           "credit", "installments"
     mn / mx : int
-        גבולות מספר-התשלומים שהחזיר ה-P400.
+        גבולות מספר‑התשלומים שהחזיר ה‑P400.
     total : float
-        סכום העסקה לשקלול סכומי תשלומים.
+        סכום העסקה.
     """
 
     # כיתובי ממשק ➜ קוד אשראי
@@ -112,6 +114,9 @@ class CreditTermDlg(QDialog):
         "6": "credit",
         "8": "installments",
     }
+
+    _CREDIT_MIN_AMOUNT = 75.0      # ₪ – threshold להצגת “קרדיט”
+    _CREDIT_MIN_PAY    = 3         # מינימום מספר‑תשלומים עבור קרדיט
 
     # ───────────────────────────────────────────────────────
     # Construction
@@ -152,7 +157,9 @@ class CreditTermDlg(QDialog):
         for label, code in self._map.items():
             field = self._map_field[code]
             if not flags.get(field, False):
-                continue
+                continue                         # DISCOVERY לא מאפשר
+            if code == "6" and total < self._CREDIT_MIN_AMOUNT:
+                continue                         # קרדיט מוסתר מתחת ל‑75 ₪
             self.cmb.addItem(label, code)
             added_any = True
         if not added_any:                       # Fallback – Immediate
@@ -176,7 +183,7 @@ class CreditTermDlg(QDialog):
 
         self.pay_spin   = QSpinBox(minimum=mn, maximum=mx, value=mn)
         self.first_spin = QDoubleSpinBox(decimals=2, maximum=total,
-                                         value=round(total / mn, 2))
+                                         value=round(total / max(1, mn), 2))
         self.next_spin  = QDoubleSpinBox(decimals=2, maximum=total)
         self.next_spin.setReadOnly(True)
 
@@ -202,7 +209,7 @@ class CreditTermDlg(QDialog):
         buttons.rejected.connect(self.reject)
         main.addWidget(buttons, alignment=Qt.AlignLeft)
 
-        # Installment-related widgets grouped יחד לנוחות
+        # Installment‑related widgets for convenience
         self._inst_widgets = [
             self.pay_lbl, self.pay_spin,
             self.first_lbl, self.first_spin,
@@ -232,12 +239,18 @@ class CreditTermDlg(QDialog):
         """הצג/הסתר שדות בהתאם לסוג אשראי שנבחר."""
         code = self.cmb.currentData()
 
-        # קרדיט (06) – רק “מס׳ תשלומים”
+        # קרדיט (06) – רק “מס׳ תשלומים”  +  מינימום 3
         if code == "6":
             for w in self._inst_widgets:
                 w.setVisible(False)
             self.pay_lbl.setVisible(True)
             self.pay_spin.setVisible(True)
+
+            # Enforce minimum of 3 payments
+            if self.pay_spin.minimum() < self._CREDIT_MIN_PAY:
+                self.pay_spin.setMinimum(self._CREDIT_MIN_PAY)
+            if self.pay_spin.value() < self._CREDIT_MIN_PAY:
+                self.pay_spin.setValue(self._CREDIT_MIN_PAY)
 
         # תשלומים (08) – כל השדות
         elif code == "8":
@@ -254,16 +267,15 @@ class CreditTermDlg(QDialog):
         """
         חשב סכומי תשלומים דינמיים.
 
-        * אם המשתמש שינה את מספר-התשלומים (pay_spin) נחשב תשלום-ראשון
-          אוטומטי: total / payments.
-        * תמיד מחשבים “תשלום המשך” כך שהסכום הכולל יתחלק באופן נכון.
+        * אם המשתמש שינה “מס׳ תשלומים” → מחשבים אוטומטית תשלום‑ראשון.
+        * תמיד מחשבים “תשלום המשך” כך שהסכום הכולל יתחלק נכון.
         """
         if not self.first_spin.isVisible():
             return
 
         sender_is_pay = self.sender() is self.pay_spin
 
-        # עדכון תשלום ראשון – רק כאשר מקור הקריאה הוא pay_spin
+        # עדכון תשלום‑ראשון – רק כשמקור הקריאה הוא pay_spin
         if sender_is_pay:
             payments = max(1, self.pay_spin.value())
             auto_first = round(self._total / payments, 2)
@@ -272,7 +284,7 @@ class CreditTermDlg(QDialog):
             self.first_spin.setValue(auto_first)
             self.first_spin.blockSignals(False)
 
-        # חישוב תשלום המשך
+        # חישוב תשלום‑המשך
         payments_remaining = max(1, self.pay_spin.value() - 1)
         remaining_total   = max(0.0, self._total - self.first_spin.value())
         next_payment      = remaining_total / payments_remaining
@@ -310,7 +322,7 @@ class CreditTermDlg(QDialog):
 
 
 # ═══════════════════════════════════════════════════════════
-#                    Discover-parameters dialog
+#                    Discover‑parameters dialog
 # ═══════════════════════════════════════════════════════════
 class DiscoverDlg(QDialog):
     """Dialog for DISCOVERY command parameters (UI only)."""
@@ -379,7 +391,9 @@ class DiscoverDlg(QDialog):
         self.fx_amt = QDoubleSpinBox(decimals=2, maximum=999999)
         for w in (self.fx_to, self.fx_amt):
             w.setEnabled(False)
-        self.fx_chk.toggled.connect(lambda b: [w.setEnabled(b) for w in (self.fx_to, self.fx_amt)])
+        self.fx_chk.toggled.connect(
+            lambda b: [w.setEnabled(b) for w in (self.fx_to, self.fx_amt)]
+        )
         fx_box.addWidget(self.fx_chk)
         fx_box.addWidget(QLabel("to"))
         fx_box.addWidget(self.fx_to)

@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# network.py  –  FULL FILE  (v1.65 • FINISH_TRAN classified as quick)
+# network.py  –  FULL FILE  (v1.66 • GET_TRAN_DETAILS endpoint)
 
 """
 Networking helpers for the Verifone-P400 desktop app
 ====================================================
 
+Changes in v1.66
+----------------
+• Added GET_TRAN_DETAILS support in WebhookServer:
+  – new /GET_TRAN_DETAILS path invokes the details_callback,
+    waits if ?wait=1, and returns the JSON receipt.
+
 Changes in v1.65
 ----------------
-• **FINISH_TRAN is now treated as a quick command**  
+• **FINISH_TRAN is now treated as a quick command**
   − Moved from *RECEIPT_CMDS* to *QUICK_CMDS* so the reader waits a
-    maximum of **4 s** instead of 15 s.  
-  − This eliminates the long pause before the webhook can start the
+    maximum of **4 s** instead of 15 s.
+  − Eliminates the long pause before the webhook can start the
     next transaction once a receipt is printed.
 
 Timing rules
 ------------
-
 | Group          | Commands                               | chunk_timeout | max_wait |
 |----------------|----------------------------------------|---------------|----------|
 | QUICK_CMDS     | PING STATUS START_TRAN **FINISH_TRAN** | 0.4 s         | 4 s      |
 | USER_CMDS      | DISCOVERY CARD_DATA SIGNATURE_CAPTURE  | 3 s           | 65 s     |
 | RECEIPT_CMDS   | AUTHORIZE REFUND                       | 1.2 s         | 15 s     |
-
-Every other command falls back to **chunk_timeout = 1 s** and
-**max_wait = 10 s**.
+| others         | fallback                               | 1 s           | 10 s     |
 """
 
 from __future__ import annotations
@@ -37,10 +40,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread, Event
 from urllib.parse import urlparse, parse_qs
 
-from PyQt5.QtCore import QThread, pyqtSignal
-from logger import log_traffic
-from utils  import to_minor
-
+from PyQt5.QtCore    import QThread, pyqtSignal
+from logger          import log_traffic
+from utils           import to_minor
 
 # ───────────────────────────────────────────────────────────
 # /pay restrictions
@@ -65,7 +67,6 @@ class SockThread(QThread):
     USER_CMDS    = {"DISCOVERY", "CARD_DATA", "SIGNATURE_CAPTURE"}
     RECEIPT_CMDS = {"AUTHORIZE", "REFUND"}
 
-    # ---------- internal helpers ----------
     def _is_done(self, buf: bytes, cmd: str) -> bool:
         if cmd in self.QUICK_CMDS or cmd in self.USER_CMDS:
             return b"<EVENT>COMPLETED" in buf
@@ -77,19 +78,16 @@ class SockThread(QThread):
         if cmd in self.RECEIPT_CMDS: return 1.2, 15.0
         return 1.0, 10.0
 
-    # ---------- ctor ----------
     def __init__(self, ip: str, port: int, msg: str):
         super().__init__(None)
         self.ip, self.port, self.msg = ip, port, msg
 
-    # ---------- thread body ----------
     def run(self):
         sent        = self.msg
         recv_buf    = b""
-        start_time  = datetime.now()        # —— START timestamp
+        start_time  = datetime.now()
 
-        # Extract command for timeout logic
-        m   = re.search(r"<COMMAND>([^<]+)</COMMAND>", sent)
+        m = re.search(r"<COMMAND>([^<]+)</COMMAND>", sent)
         cmd = m.group(1) if m else ""
         chunk_to, max_wait = self._timers(cmd)
 
@@ -114,12 +112,9 @@ class SockThread(QThread):
             recv_buf = f"Error: {exc}".encode()
 
         recv_txt  = recv_buf.decode("utf-8", "replace")
-        end_time  = datetime.now()          # —— END timestamp
+        end_time  = datetime.now()
 
-        # Log traffic with timestamps
         log_traffic(sent, recv_txt, start_time, end_time)
-
-        # Emit to GUI
         self.result.emit(sent, recv_txt)
 
 
@@ -128,37 +123,36 @@ class SockThread(QThread):
 # ══════════════════════════════════════════════════════════
 class WebhookServer(Thread):
     """
-    Tiny HTTP server exposing /pay and /receipt endpoints.
+    Tiny HTTP server exposing /pay, /receipt and /GET_TRAN_DETAILS endpoints.
 
     Features
     --------
-    • /pay?amount=000000012345      – 12-digit minor units
-    • /pay?amount=123.45            – decimal shekels
-    • ?type=01 … 06 30 53 55        – transaction type
-    • ?wait=1                       – wait for receipt (JSON)
+    • /pay?amount=…[&type=…][&wait=1]     – trigger Quick-Sale
+    • /receipt.json                        – returns last JSON payload
+    • /GET_TRAN_DETAILS[?wait=1]           – trigger GET_TRAN_DETAILS
     """
 
-    def __init__(self, host: str, port: int, callback):
+    def __init__(self, host: str, port: int,
+                 pay_callback, details_callback):
         super().__init__(daemon=True)
-        self.host, self.port, self.callback = host, port, callback
+        self.host                = host
+        self.port                = port
+        self._pay_callback       = pay_callback
+        self._details_callback   = details_callback
         self._q: "queue.Queue[bytes]" = queue.Queue()
-        self._signal = Event()
-        self._last   = b"{}"
+        self._signal             = Event()
+        self._last               = b"{}"
 
-    # ---------- publish receipt ----------
     def publish(self, data: bytes):
         data = data or b"{}"
         self._q.put(data)
         self._last = data
         self._signal.set()
 
-    # ---------- HTTP handler ----------
     def run(self):
         outer = self
 
         class H(BaseHTTPRequestHandler):
-
-            # ――― helpers ―――
             def _plain(self, st, body=b""):
                 self.send_response(st)
                 self.send_header("Content-Type", "text/plain")
@@ -176,7 +170,6 @@ class WebhookServer(Thread):
                 self.end_headers()
                 self.wfile.write(body)
 
-            # ――― CORS pre-flight ―――
             def do_OPTIONS(self):
                 self.send_response(204)
                 self.send_header("Access-Control-Allow-Origin", "*")
@@ -185,24 +178,37 @@ class WebhookServer(Thread):
                 self.send_header("Access-Control-Max-Age", "86400")
                 self.end_headers()
 
-            # ――― main GET ―――
             def do_GET(self):
                 try:
                     p = urlparse(self.path)
+                    q = parse_qs(p.query)
+                    wait = q.get("wait", ["0"])[0] == "1"
 
                     # /receipt.json
                     if p.path in ("/receipt", "/receipt.json"):
                         return self._json(200, outer._last)
 
-                    # /pay
+                    # GET_TRAN_DETAILS endpoint
+                    if p.path.upper() == "/GET_TRAN_DETAILS":
+                        outer._details_callback()
+                        if not wait:
+                            return self._plain(200, b"OK")
+                        if not outer._signal.wait(timeout=65):
+                            return self._plain(504, b"timeout")
+                        try:
+                            body = outer._q.get_nowait()
+                        except queue.Empty:
+                            return self._plain(504, b"timeout")
+                        if outer._q.empty():
+                            outer._signal.clear()
+                        return self._json(200, body)
+
+                    # /pay endpoint
                     if p.path != "/pay":
                         return self._plain(404, b"Not Found")
 
-                    q = parse_qs(p.query)
                     raw_amt = q.get("amount", [""])[0]
-
-                    # ----- amount parsing -------
-                    if re.fullmatch(r"\d{12}", raw_amt):      # 000000012345
+                    if re.fullmatch(r"\d{12}", raw_amt):
                         amt = int(raw_amt) / 100
                     else:
                         try:
@@ -215,33 +221,24 @@ class WebhookServer(Thread):
                     if code not in VALID_TYPES:
                         return self._plain(400, b"invalid type")
 
-                    wait = q.get("wait", ["0"])[0] == "1"
-
-                    # Hand off to GUI layer
-                    outer.callback(amt, code)
-
+                    outer._pay_callback(amt, code)
                     if not wait:
                         return self._plain(200, b"OK")
 
                     if not outer._signal.wait(timeout=65):
                         return self._plain(504, b"timeout")
-
                     try:
                         body = outer._q.get_nowait()
                     except queue.Empty:
                         return self._plain(504, b"timeout")
-
                     if outer._q.empty():
                         outer._signal.clear()
-
                     return self._json(200, body)
 
                 except (ConnectionAbortedError, BrokenPipeError):
-                    return  # client disconnected; ignore
+                    return
 
-            # suppress default logging
-            def log_message(self, *args):     # noqa: D401
+            def log_message(self, *args):
                 pass
 
-        # Run HTTP server forever
         HTTPServer((self.host, self.port), H).serve_forever()
