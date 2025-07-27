@@ -8,7 +8,7 @@
     "alt": "012345678",
     "pos_type": "ATTENDED",
     "ktk": "R4Yr85sVUWyuJyCP",
-    "quick_amount": 3.01,
+    "quick_amount": 7.01,
     "webhook_host": "localhost",
     "webhook_port": 8080,
     "shva_term_id": "0883662012"

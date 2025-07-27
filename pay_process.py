@@ -166,9 +166,29 @@ class QuickSaleMixin:
         hide_prompt()
         hide_spinner()
 
+        # reset *early* so cancel path will always publish
+        self._receipt_sent    = False
+        self._awaiting_cancel = False
+        self._last_xml        = ""
+
         dlg = _ManualChoiceDlg(None)
         if dlg.exec_() != QDialog.Accepted:
             show_prompt("העסקה בוטלה", 3000)
+
+            # Write minimal receipt.json and publish immediately
+            payload = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "result":    "העסקה בוטלה",
+            }
+            try:
+                with open("receipt.json", "w", encoding="utf-8") as fp:
+                    json.dump(payload, fp, ensure_ascii=False, indent=2)
+                with open("receipt.json", "rb") as fp:
+                    self.webhook.publish(fp.read())
+            except Exception:
+                self.webhook.publish(json.dumps(payload, ensure_ascii=False).encode())
+            self._receipt_sent = True
+
             self._qs_done()
             return
 
@@ -179,16 +199,12 @@ class QuickSaleMixin:
         self._current_amount = amount
         self.qs_amount.setValue(amount)
 
-        self._receipt_sent    = False
-        self._awaiting_cancel = False
-        self._last_xml        = ""     # reset cache for new run
-
-        # ------------- DISCOVERY defaults -------------
+        # DISCOVERY defaults
         self.qs_defaults = {
             "timeout":        "60",
             "restrict_token": "0",
             "manual":         manual,
-            "manual_reason":  "CNP" if manual else "",   # always CNP
+            "manual_reason":  "CNP" if manual else "",
             "tran_type":      tran_type,
             "amount":         to_minor(amount),
             "currency":       "376",
@@ -202,7 +218,7 @@ class QuickSaleMixin:
             "ctls":           True,
             "allow_cancel":   True,
             "unattended":     False,
-            "operation":      "04",                      # DISCOVERY omits OPERATION
+            "operation":      "04",
         }
         self.qs_start_body = (
             "<INVOICE>100000</INVOICE>"
@@ -373,19 +389,23 @@ class QuickSaleMixin:
         """
         hide_spinner()
 
-        # Nothing was published yet →
-        #  1) אם יש XML אחרון – הפוך אותו לקבלה ופרסם.
-        #  2) אם אין XML (בוטל לפני DISCOVERY) – פרסם הודעת ביטול קצרה.
         if not self._receipt_sent:
             if self._last_xml:
+                # We have last XML → save normal receipt and publish
                 self._publish_json_receipt(self._last_xml)
             else:
-                # early cancel – craft minimal payload
+                # Early cancel (no XML at all) → write file then publish
                 payload = {
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "result":    "העסקה בוטלה",
                 }
-                self.webhook.publish(json.dumps(payload, ensure_ascii=False).encode())
+                try:
+                    with open("receipt.json", "w", encoding="utf-8") as fp:
+                        json.dump(payload, fp, ensure_ascii=False, indent=2)
+                    with open("receipt.json", "rb") as fp:
+                        self.webhook.publish(fp.read())
+                except Exception:
+                    self.webhook.publish(json.dumps(payload, ensure_ascii=False).encode())
                 self._receipt_sent = True
 
         # reset state & continue queue
