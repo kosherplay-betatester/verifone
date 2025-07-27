@@ -1,16 +1,16 @@
 {
-  "fetched_at": "2025-07-27 11:54:48",
+  "fetched_at": "2025-07-27 12:53:29",
   "result": "הצלחה",
   "items": {
-    "trans_id": "X98FMNZ-0004734",
-    "amount": 9.01,
+    "trans_id": "X98FMNZ-0004836",
+    "amount": 7.01,
     "masked_pan": "531084******9139",
     "tran_type": "01",
-    "credit_terms": 8,
-    "payments_number": 5,
-    "first_payment": 1.81,
-    "next_payment": 1.8,
-    "terminal_timestamp": "07/27/2025 11:53:55",
-    "issuer_auth_num": "2176292"
+    "credit_terms": 1,
+    "payments_number": 0,
+    "first_payment": 0.0,
+    "next_payment": 0.0,
+    "terminal_timestamp": "07/27/2025 12:51:50",
+    "issuer_auth_num": "2176604"
   }
 }
