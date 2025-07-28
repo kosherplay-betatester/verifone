@@ -85,26 +85,73 @@ class _ManualChoiceDlg(QDialog):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        # תמיד מלפנים + מודאלי לאפליקציה
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint | Qt.Window)
         self.setWindowModality(Qt.ApplicationModal)
         self.setWindowTitle("בחר סוג הזנה")
         self.setLayoutDirection(Qt.RightToLeft)
         self.setFont(QFont("Segoe UI", 10))
+        self.setFocusPolicy(Qt.StrongFocus)
+        # חשוב ב‑Windows: אל תאפשר "show without activating"
+        self.setAttribute(Qt.WA_ShowWithoutActivating, False)
 
         lay  = QVBoxLayout(self)
-        form = QFormLayout(); lay.addLayout(form)
+        form = QFormLayout()
+        lay.addLayout(form)
 
         self.cmb = QComboBox()
         self.cmb.addItem("רגיל", False)
         self.cmb.addItem("ידני (הקלדת כרטיס)", True)
         form.addRow(QLabel("סוג עסקה:"), self.cmb)
 
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.button(QDialogButtonBox.Ok).setText("אישור")
-        btns.button(QDialogButtonBox.Cancel).setText("ביטול")
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
+        self._buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self._ok_btn = self._buttons.button(QDialogButtonBox.Ok)
+        self._cn_btn = self._buttons.button(QDialogButtonBox.Cancel)
+        self._ok_btn.setText("אישור")
+        self._cn_btn.setText("ביטול")
+
+        # Enter ילחץ כברירת‑מחדל על OK
+        self._ok_btn.setAutoDefault(True)
+        self._ok_btn.setDefault(True)
+        self._cn_btn.setAutoDefault(False)
+
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+        lay.addWidget(self._buttons)
+
+        # נסה לעגן פוקוס מיד עם ההצגה וגם קצת אחרי (לטובת Windows)
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(0, self._force_activate)
+        QTimer.singleShot(100, self._force_activate)   # ניסיון חוזר קצר
+
+    # --- מיקוד אגרסיבי: מעלה, מפעיל, קובע חלון פעיל, ומציב פוקוס על OK ---
+    def _force_activate(self):
+        try:
+            self.raise_()
+            self.activateWindow()
+            from PyQt5.QtWidgets import QApplication
+            QApplication.setActiveWindow(self)
+            # אם כפתור OK קיים – מקבל את הפוקוס; אחרת הקומבו‑בוקס
+            if self._ok_btn is not None:
+                self._ok_btn.setFocus(Qt.ActiveWindowFocusReason)
+            else:
+                self.cmb.setFocus(Qt.ActiveWindowFocusReason)
+        except Exception:
+            pass
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._force_activate()
+
+    def keyPressEvent(self, e):
+        """Enter=OK, Esc=Cancel מכל מקום בדיאלוג."""
+        if e.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.accept()
+            return
+        if e.key() == Qt.Key_Escape:
+            self.reject()
+            return
+        super().keyPressEvent(e)
 
     def is_manual(self) -> bool:
         return bool(self.cmb.currentData())
