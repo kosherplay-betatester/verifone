@@ -63,3 +63,4 @@ Requests a sale of **₪ 9.01** (minor units `000000000901`), waits for the rec
 
 ```none
 http://localhost:8080/pay?amount=000000000901&type=01&wait=1
+http://localhost:8080/GET_TRAN_DETAILS?wait=1
