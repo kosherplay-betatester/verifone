@@ -4,17 +4,17 @@
 logger.py  –  Dual-format network logger with 14-day rotation
 =============================================================
 
-v2.3  (hide ENTRY_MODE in readable log)
----------------------------------------
-• Plain-text summary now strips every <ENTRY_MODE>…</ENTRY_MODE> pair before
-  pretty-printing the response, so operators no longer see the tag.
-• XML log is unchanged — the full payload is still preserved for auditing.
+v2.4 (per-response logging polish)
+----------------------------------
+• תומך כעת ב-log_traffic(sent=None) / sent=""
+  - במצב “response-only” (מגיע מ-network.py אחרי פיצול
+    <RESPONSE>-ים) לא מושמע בלוק SENT בפלט הקריא,
+    ולכן ה-request לא משוכפל שוב ושוב.
+  - ב-XML נשמר <sent> ריק כדי לשמור על מבנה קבוע.
 
-Earlier v2.2.1
---------------
-• Fixed stray quote in `_rotate_if_needed()` that caused a SyntaxError.
-• Retains v2.2 behaviour: every <event> carries `time=`, `start=`, `end=`,
-  and each block includes <sent_time>/<recv_time>.
+v2.3 (hide ENTRY_MODE in readable log)
+--------------------------------------
+• Plain-text summary strips every <ENTRY_MODE>…</ENTRY_MODE> pair.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import re
 import shutil
 from datetime import datetime, timedelta
 from typing import Final
+
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
@@ -37,9 +38,7 @@ _HUM_BAK:  Final[str] = "logs_readable.bak"
 _ROTATE_AFTER: Final[timedelta] = timedelta(days=14)
 
 # Tags to suppress in plain-text summaries
-_SUPPRESS_TAGS = [
-    "ENTRY_MODE",
-]
+_SUPPRESS_TAGS = ["ENTRY_MODE"]
 
 # ───────────────────────────────────────────────────────────
 #  File-management helpers
@@ -84,6 +83,9 @@ def _rotate_if_needed() -> None:
 # ───────────────────────────────────────────────────────────
 def _pretty_xml(raw: str) -> str:
     """Indent XML; handles concatenated <RESPONSE> blocks gracefully."""
+    raw = raw.strip()
+    if not raw:
+        return ""
     try:
         mult = raw.lstrip().startswith("<RESPONSE") and raw.count("<RESPONSE") > 1
         wrapped = f"<root>{raw}</root>" if mult else raw
@@ -115,43 +117,66 @@ def _hide_tags(xml_txt: str) -> str:
     return xml_txt
 
 
-def _summarise(sent: str, recv: str,
-               t_send: datetime, t_recv: datetime) -> str:
+def _summarise(sent: str | None,
+               recv: str,
+               t_send: datetime,
+               t_recv: datetime) -> str:
     """Build plain-text block shown in logs_readable.txt."""
-    # Strip unwanted tags from RECV before pretty-printing
     recv_clean = _hide_tags(recv)
 
     ts_s = t_send.strftime("%Y-%m-%d %H:%M:%S")
     ts_r = t_recv.strftime("%Y-%m-%d %H:%M:%S")
 
-    cmd  = re.search(r"<COMMAND>([^<]+)</COMMAND>", sent)
-    cmd_str = cmd.group(1) if cmd else "?"
+    # Try to determine COMMAND from sent; fall back to recv if missing.
+    if sent:
+        m_cmd = re.search(r"<COMMAND>([^<]+)</COMMAND>", sent)
+        cmd_str = m_cmd.group(1) if m_cmd else "?"
+    else:
+        m_cmd = re.search(r"<COMMAND>([^<]+)</COMMAND>", recv_clean)
+        cmd_str = m_cmd.group(1) if m_cmd else "?"
 
-    rcd  = re.search(r"<RESULT_CODE>([^<]+)<", recv_clean)
-    rcd_str = f"  |  RESULT_CODE: {rcd.group(1)}" if rcd else ""
+    m_rcd = re.search(r"<RESULT_CODE>([^<]+)<", recv_clean)
+    rcd_str = f"  |  RESULT_CODE: {m_rcd.group(1)}" if m_rcd else ""
 
-    return "\n".join([
+    lines: list[str] = [
         "-" * 72,
         f"{ts_s} START  | COMMAND: {cmd_str}{rcd_str}",
-        f"SENT  @ {ts_s}",
-        *("  " + ln for ln in _pretty_xml(sent).splitlines()),
+    ]
+
+    if sent:
+        lines += [
+            f"SENT  @ {ts_s}",
+            *("  " + ln for ln in _pretty_xml(sent).splitlines() if ln.strip()),
+        ]
+
+    lines += [
         f"RECV  @ {ts_r}",
-        *("  " + ln for ln in _pretty_xml(recv_clean).splitlines()),
+        *("  " + ln for ln in _pretty_xml(recv_clean).splitlines() if ln.strip()),
         f"{ts_r} END",
         "-" * 72,
-        ""
-    ])
+        "",
+    ]
+    return "\n".join(lines)
 
 # ───────────────────────────────────────────────────────────
 #  Public API
 # ───────────────────────────────────────────────────────────
-def log_traffic(sent: str, recv: str,
-                start_dt: datetime, end_dt: datetime) -> None:
+def log_traffic(sent: str | None,
+                recv: str,
+                start_dt: datetime,
+                end_dt: datetime) -> None:
     """
     Append one request/response pair to both logs with full timestamps.
 
-    • XML log keeps the *exact* payloads (no filtering).  
-    • Human-readable log suppresses tags listed in _SUPPRESS_TAGS.
+    Parameters
+    ----------
+    sent   : str | None
+        The original request XML.  If *None* or empty, the human log
+        will omit the SENT block (used for per-response logging).
+    recv   : str
+        The response (or partial response) XML text.
+    start_dt / end_dt : datetime
+        Wall-clock timestamps for this event.
     """
     _ensure_xml_root()
     _rotate_if_needed()
@@ -159,17 +184,25 @@ def log_traffic(sent: str, recv: str,
     iso_start = start_dt.strftime("%Y-%m-%dT%H:%M:%S")
     iso_end   = end_dt.strftime("%Y-%m-%dT%H:%M:%S")
 
+    sent_txt = (sent or "").strip()
+    recv_txt = recv.strip()
+
     # —— XML log ——————————————————————————————
     with open(_XML_FILE, "a", encoding="utf-8") as fp:
         fp.write(
             f'  <event time="{iso_start}" start="{iso_start}" end="{iso_end}">\n'
             f'    <sent_time>{iso_start}</sent_time>\n'
-            f'    <sent>{_cdata(_pretty_xml(sent.strip()))}</sent>\n'
+            f'    <sent>{_cdata(_pretty_xml(sent_txt))}</sent>\n'
             f'    <recv_time>{iso_end}</recv_time>\n'
-            f'    <recv>{_cdata(_pretty_xml(recv.strip()))}</recv>\n'
+            f'    <recv>{_cdata(_pretty_xml(recv_txt))}</recv>\n'
             f'  </event>\n'
         )
 
     # —— Plain-text log ————————————————————————
     with open(_HUM_FILE, "a", encoding="utf-8") as fp:
-        fp.write(_summarise(sent, recv, start_dt, end_dt))
+        fp.write(
+            _summarise(sent_txt if sent else None,
+                       recv_txt,
+                       start_dt,
+                       end_dt)
+        )

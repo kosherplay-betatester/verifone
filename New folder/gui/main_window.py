@@ -322,10 +322,27 @@ class MainWindow(QuickSaleMixin, QMainWindow):  # mixin *first* in MRO
         """
         Send REPORT/GET_TRAN_DETAILS for the last known TRANS_ID,
         then publish its structured receipt via the webhook.
+
+        If there is no last transaction available, publish a minimal JSON
+        immediately so that /GET_TRAN_DETAILS?wait=1 returns without timeout.
         """
         if not self._trans_id:
             self._crit("GetDetails", "No last transaction available")
+
+            # Publish a small JSON immediately to release the webhook waiters.
+            # נמנעים מתלות ב-import json כאן ע"י בניית מחרוזת ידנית.
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            body = (
+                '{"fetched_at":"' + now +
+                '","result":"No last transaction available","items":{}}'
+            ).encode("utf-8")
+            try:
+                self.webhook.publish(body)
+            except Exception:
+                # Fallback (shouldn't happen): publish a simpler body
+                self.webhook.publish(b'{"result":"No last transaction available"}')
             return
+
         body = f"<TRANS_ID>{self._trans_id}</TRANS_ID>"
         xml = env_xml(
             "REPORT", "GET_TRAN_DETAILS", self.session,

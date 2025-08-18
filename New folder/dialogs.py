@@ -265,32 +265,42 @@ class CreditTermDlg(QDialog):
 
     def _recalc_next(self):
         """
-        חשב סכומי תשלומים דינמיים.
-
-        * אם המשתמש שינה “מס׳ תשלומים” → מחשבים אוטומטית תשלום‑ראשון.
-        * תמיד מחשבים “תשלום המשך” כך שהסכום הכולל יתחלק נכון.
+        חישוב סכומי תשלומים כך שהסכום המצטבר יתאים בדיוק
+        לסכום העסקה – השארית (אם קיימת) נכנסת לתשלום הראשון.
         """
         if not self.first_spin.isVisible():
             return
 
-        sender_is_pay = self.sender() is self.pay_spin
+        payments = max(1, self.pay_spin.value())
+        remain_cnt = max(1, payments - 1)
 
-        # עדכון תשלום‑ראשון – רק כשמקור הקריאה הוא pay_spin
-        if sender_is_pay:
-            payments = max(1, self.pay_spin.value())
-            auto_first = round(self._total / payments, 2)
+        # =============================
+        # חישוב אוטומטי (pay_spin שונה)
+        # =============================
+        if self.sender() is self.pay_spin:
+            # “תשלום המשך” ‑ תמיד נקבע ע"י חיתוך כלפי מטה לשתי ספרות
+            all_agorot   = int(round(self._total * 100))
+            nxt_agorot   = all_agorot // payments          # floor
+            next_payment = nxt_agorot / 100.0
 
-            self.first_spin.blockSignals(True)
-            self.first_spin.setValue(auto_first)
-            self.first_spin.blockSignals(False)
+            # השארית מצורפת לתשלום הראשון
+            first_payment = round(self._total - next_payment * remain_cnt, 2)
 
-        # חישוב תשלום‑המשך
-        payments_remaining = max(1, self.pay_spin.value() - 1)
-        remaining_total   = max(0.0, self._total - self.first_spin.value())
-        next_payment      = remaining_total / payments_remaining
+        # ======================================
+        # המשתמש ערך ידנית את first_spin → עדכן
+        # ======================================
+        else:
+            first_payment = self.first_spin.value()
+            remain_total  = max(0.0, self._total - first_payment)
+            next_payment  = round(remain_total / remain_cnt, 2)
+
+        # — הצגה (ללא טריגר חוזר) —
+        self.first_spin.blockSignals(True)
+        self.first_spin.setValue(first_payment)
+        self.first_spin.blockSignals(False)
 
         self.next_spin.blockSignals(True)
-        self.next_spin.setValue(round(next_payment, 2))
+        self.next_spin.setValue(next_payment)
         self.next_spin.blockSignals(False)
 
     # ───────────────────────────────────────────────────────

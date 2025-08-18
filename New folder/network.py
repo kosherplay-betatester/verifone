@@ -1,33 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# network.py  –  FULL FILE  (v1.66 • GET_TRAN_DETAILS endpoint)
+# network.py  –  FULL FILE  (v1.70 • fresh‑publish wait for GET_DETAILS + no duplicated SENT)
 
 """
-Networking helpers for the Verifone-P400 desktop app
+Networking helpers for the Verifone‑P400 desktop app
 ====================================================
 
-Changes in v1.66
-----------------
-• Added GET_TRAN_DETAILS support in WebhookServer:
-  – new /GET_TRAN_DETAILS path invokes the details_callback,
-    waits if ?wait=1, and returns the JSON receipt.
+v1.70 (2025‑07‑27)
+------------------
+• **Fresh publish for /GET_TRAN_DETAILS?wait=1 (and /pay?wait=1):**
+  לפני שמתחילים להמתין לפרסום, מרוקנים את התור הפנימי (_q) ומנקים את האות
+  (_signal). כך לא יוחזר פרסום ישן שנדחף לפני הקריאה, והשרת יחכה *אך ורק*
+  לפרסום החדש שמגיע בעקבות הפקודה שזה עתה נשלחה.
+• שומר על שיפורי v1.69:
+  – לוג “חי” לכל EVENT ללא שכפול ה‑SENT (ה‑request נרשם פעם אחת בלבד).
+  – /pay?wait=1 ו‑/GET_TRAN_DETAILS?wait=1 ממתינים עד **180 s** לקבלה.
 
-Changes in v1.65
-----------------
-• **FINISH_TRAN is now treated as a quick command**
-  − Moved from *RECEIPT_CMDS* to *QUICK_CMDS* so the reader waits a
-    maximum of **4 s** instead of 15 s.
-  − Eliminates the long pause before the webhook can start the
-    next transaction once a receipt is printed.
-
-Timing rules
-------------
-| Group          | Commands                               | chunk_timeout | max_wait |
-|----------------|----------------------------------------|---------------|----------|
-| QUICK_CMDS     | PING STATUS START_TRAN **FINISH_TRAN** | 0.4 s         | 4 s      |
-| USER_CMDS      | DISCOVERY CARD_DATA SIGNATURE_CAPTURE  | 3 s           | 65 s     |
-| RECEIPT_CMDS   | AUTHORIZE REFUND                       | 1.2 s         | 15 s     |
-| others         | fallback                               | 1 s           | 10 s     |
+Timing rules (TCP) stay the same.
 """
 
 from __future__ import annotations
@@ -35,14 +24,16 @@ from __future__ import annotations
 import re
 import socket
 import queue
+import time
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread, Event
 from urllib.parse import urlparse, parse_qs
 
-from PyQt5.QtCore    import QThread, pyqtSignal
-from logger          import log_traffic
-from utils           import to_minor
+from PyQt5.QtCore import QThread, pyqtSignal
+
+from logger import log_traffic
+from utils  import to_minor  # kept for compatibility (may be used by callers)
 
 # ───────────────────────────────────────────────────────────
 # /pay restrictions
@@ -55,8 +46,8 @@ VALID_TYPES = {"01", "02", "03", "06", "30", "53", "55"}
 # ══════════════════════════════════════════════════════════
 class SockThread(QThread):
     """
-    One-shot TCP thread that sends a single XML command to the P400 and
-    collects the response.
+    One-shot TCP thread that sends a single XML command to the P400,
+    logs each RESPONSE block as it arrives, and emits the full text back.
     """
 
     # (sent_xml, received_text) will be delivered back to the GUI
@@ -84,12 +75,16 @@ class SockThread(QThread):
 
     def run(self):
         sent        = self.msg
-        recv_buf    = b""
+        recv_full   = b""
+        recv_chunk  = b""
         start_time  = datetime.now()
 
         m = re.search(r"<COMMAND>([^<]+)</COMMAND>", sent)
         cmd = m.group(1) if m else ""
         chunk_to, max_wait = self._timers(cmd)
+
+        # we will log SENT only for the first block we flush
+        logged_sent_once = False
 
         try:
             with socket.create_connection((self.ip, self.port), timeout=3) as s:
@@ -105,17 +100,41 @@ class SockThread(QThread):
                         continue
                     if not chunk:
                         break
-                    recv_buf += chunk
-                    if self._is_done(recv_buf, cmd):
+
+                    recv_full  += chunk
+                    recv_chunk += chunk
+
+                    # Log each fully closed </RESPONSE>
+                    while b"</RESPONSE>" in recv_chunk:
+                        end   = recv_chunk.index(b"</RESPONSE>") + len(b"</RESPONSE>")
+                        block = recv_chunk[:end]
+                        recv_chunk = recv_chunk[end:]
+
+                        log_traffic(
+                            sent if not logged_sent_once else None,
+                            block.decode("utf-8", "replace"),
+                            start_time,
+                            datetime.now()
+                        )
+                        logged_sent_once = True
+
+                    if self._is_done(recv_full, cmd):
                         break
+
         except Exception as exc:
-            recv_buf = f"Error: {exc}".encode()
+            recv_full = f"Error: {exc}".encode()
 
-        recv_txt  = recv_buf.decode("utf-8", "replace")
-        end_time  = datetime.now()
+        # Log any leftover (e.g. </TRANSACTION> not wrapped by <RESPONSE>)
+        if recv_chunk.strip():
+            log_traffic(
+                sent if not logged_sent_once else None,
+                recv_chunk.decode("utf-8", "replace"),
+                start_time,
+                datetime.now()
+            )
+            logged_sent_once = True
 
-        log_traffic(sent, recv_txt, start_time, end_time)
-        self.result.emit(sent, recv_txt)
+        self.result.emit(sent, recv_full.decode("utf-8", "replace"))
 
 
 # ══════════════════════════════════════════════════════════
@@ -149,10 +168,20 @@ class WebhookServer(Thread):
         self._last = data
         self._signal.set()
 
+    # NEW in v1.70: ensure next wait returns **fresh** publish
+    def _drain_queue_and_reset(self):
+        try:
+            while True:
+                self._q.get_nowait()
+        except queue.Empty:
+            pass
+        self._signal.clear()
+
     def run(self):
         outer = self
 
         class H(BaseHTTPRequestHandler):
+            # ---------- helpers ----------
             def _plain(self, st, body=b""):
                 self.send_response(st)
                 self.send_header("Content-Type", "text/plain")
@@ -178,6 +207,22 @@ class WebhookServer(Thread):
                 self.send_header("Access-Control-Max-Age", "86400")
                 self.end_headers()
 
+            # Wait (up to 180s) for a published receipt
+            def _wait_for_receipt(self, max_sec: int = 180):
+                expiry = time.time() + max_sec
+                while time.time() < expiry:
+                    left = expiry - time.time()
+                    if outer._signal.wait(timeout=min(2, left)):
+                        try:
+                            body = outer._q.get_nowait()
+                        except queue.Empty:
+                            outer._signal.clear()
+                            continue
+                        if outer._q.empty():
+                            outer._signal.clear()
+                        return body
+                return None
+
             def do_GET(self):
                 try:
                     p = urlparse(self.path)
@@ -190,17 +235,17 @@ class WebhookServer(Thread):
 
                     # GET_TRAN_DETAILS endpoint
                     if p.path.upper() == "/GET_TRAN_DETAILS":
+                        # v1.70: waiters should get only a *new* publish from this call
+                        if wait:
+                            outer._drain_queue_and_reset()
+
                         outer._details_callback()
                         if not wait:
                             return self._plain(200, b"OK")
-                        if not outer._signal.wait(timeout=65):
+
+                        body = self._wait_for_receipt()
+                        if body is None:
                             return self._plain(504, b"timeout")
-                        try:
-                            body = outer._q.get_nowait()
-                        except queue.Empty:
-                            return self._plain(504, b"timeout")
-                        if outer._q.empty():
-                            outer._signal.clear()
                         return self._json(200, body)
 
                     # /pay endpoint
@@ -221,24 +266,24 @@ class WebhookServer(Thread):
                     if code not in VALID_TYPES:
                         return self._plain(400, b"invalid type")
 
+                    # v1.70: ensure we wait only for receipt generated by *this* sale
+                    if wait:
+                        outer._drain_queue_and_reset()
+
                     outer._pay_callback(amt, code)
                     if not wait:
                         return self._plain(200, b"OK")
 
-                    if not outer._signal.wait(timeout=65):
+                    body = self._wait_for_receipt()
+                    if body is None:
                         return self._plain(504, b"timeout")
-                    try:
-                        body = outer._q.get_nowait()
-                    except queue.Empty:
-                        return self._plain(504, b"timeout")
-                    if outer._q.empty():
-                        outer._signal.clear()
                     return self._json(200, body)
 
                 except (ConnectionAbortedError, BrokenPipeError):
                     return
 
             def log_message(self, *args):
+                # silence BaseHTTPRequestHandler's default noisy logging
                 pass
 
         HTTPServer((self.host, self.port), H).serve_forever()
